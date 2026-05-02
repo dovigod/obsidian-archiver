@@ -1,0 +1,41 @@
+{
+  "name": "knowledge-hub",
+  "version": "0.1.0",
+  "description": "Personal AI knowledge hub — captures conversations and converts them into reusable structured knowledge in an Obsidian vault.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20.10"
+  },
+  "bin": {
+    "kh": "dist/bin/cli.js",
+    "kh-mcp": "dist/bin/mcp-server.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json --resolve-full-paths",
+    "dev:mcp": "tsx src/bin/mcp-server.ts",
+    "dev:cli": "tsx src/bin/cli.ts",
+    "pretest": "node -e \"require('fs').rmSync('test_result',{recursive:true,force:true})\"",
+    "test": "node --import tsx --test test/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
+    "gray-matter": "^4.0.3",
+    "simple-git": "^3.27.0",
+    "uuid": "^11.0.3",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.10.0",
+    "eslint": "^10.3.0",
+    "tsc-alias": "^1.8.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "typescript-eslint": "^8.59.1"
+  },
+  "packageManager": "pnpm@9.12.3+sha512.cce0f9de9c5a7c95bef944169cc5dfe8741abfb145078c0d508b868056848a87c81e626246cb60967cbd7fd29a6c062ef73ff840d96b3c86c40ac92cf4a813ee"
+}
