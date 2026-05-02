@@ -119,6 +119,26 @@ When new content arrives for an existing entity, the system passes existing page
 
 Configurable per-project and globally.
 
+## Concurrency: single sequential queue
+
+Multiple capture requests can arrive concurrently — two MCP tool calls in flight, a Stop hook firing while a manual archive is running, two parallel Claude Code sessions ending at once. Concurrent processing races on three shared resources: the git index (`.git/index.lock`), and at Stage 2+ the same entity page (`knowledge/Redis.md`) and the same index file. Rather than building per-resource locks, the system runs **at most one conversation through the pipeline at a time**.
+
+```
+archive_conversation (MCP) ──┐
+archive-transcript   (CLI) ──┼──► SequentialQueue ──► one worker ──► full pipeline
+future tools               ──┘                                       (write → commit → classify → synthesize)
+```
+
+**In-process FIFO (`src/core/queue/sequential-queue.ts`).** A minimal queue with a single drain loop, used at module scope inside the MCP server. The handler for `archive_conversation` calls `queue.enqueue(() => archiveConversation(...))` and awaits its result. A failing job rejects only its own caller; the drain loop continues with the next job. Properties:
+
+- Strict FIFO submission order.
+- At most one job in flight (`maxActive === 1`).
+- `queue.depth` exposed for future metrics.
+
+**Cross-process collisions.** The CLI is a one-shot process invoked from Stop hooks, so the in-process queue does not coordinate it with a long-running MCP server. The git layer absorbs that race: `autoCommit` retries on `index.lock` errors with backoff `[50, 150, 300] ms` (3 attempts). No vault-level lockfile in Stage 1; revisit if retries start failing in practice.
+
+**Stage-1 latency vs. Stage-2 fire-and-forget.** Today the MCP caller blocks until the full pipeline finishes; that is fine because the pipeline is just file write + git commit (milliseconds). When Stage 2 introduces LLM classification/synthesis (seconds), the MCP entry point switches to fire-and-forget: enqueue a job, return a job ID immediately, drain asynchronously. The queue itself does not change — only the moment the caller stops waiting moves earlier.
+
 ## Staged build
 
 | Stage | Output | Exit criterion |
@@ -159,8 +179,9 @@ src/
       reindex.ts
       rebalance.ts
     queue/
-      fs-queue.ts
-    git.ts
+      sequential-queue.ts  # in-process FIFO; single drain loop
+      fs-queue.ts          # Stage 2+: cross-process job queue under vault/_queue/
+    git.ts             # autoCommit with index.lock retry (50/150/300 ms x3)
   bin/
     mcp-server.ts      # stdio MCP — exposes archive_conversation
     cli.ts             # subcommands: archive-transcript, worker, rebalance, apply-proposal
@@ -186,3 +207,4 @@ tsconfig.json
 2. Entity-graph prompt size — pre-filter via keyword retrieval once graph exceeds ~500 entities; later add sqlite-vec.
 3. Page identity stability — entity-name filenames are MVP; restructuring carries link-rewrite step. Switch to uuid-based filenames if rename churn becomes a problem.
 4. LLM-rewrite quality — heavy reliance on prompt engineering; mitigated by mandatory git auto-commit.
+5. Cross-process git collisions — `autoCommit` retries `index.lock` 3x with backoff. If concurrent Stop hooks ever exhaust retries in practice, add a vault-level lockfile (`vault/.kh.lock` via atomic mkdir) before falling back to a filesystem queue at this layer.

@@ -9,6 +9,7 @@ import { Role } from "@constants/role";
 import { Source } from "@constants/source";
 import { archiveConversation } from "@core/archive";
 import { loadConfig } from "@core/config";
+import { SequentialQueue } from "@core/queue/sequential-queue";
 import { ArchiveInputSchema } from "@core/schema";
 
 const ARCHIVE_TOOL_NAME = "archive_conversation";
@@ -59,6 +60,12 @@ const archiveInputJsonSchema = {
   },
 } as const;
 
+// One queue for the lifetime of the MCP server process. Every conversation-
+// processing request runs through it so the pipeline (write → commit → future
+// classify/synthesize) stays strictly sequential and free of race conditions
+// on shared resources (git index, future entity pages).
+const processingQueue = new SequentialQueue();
+
 async function main(): Promise<void> {
   const server = new Server(
     { name: "knowledge-hub", version: "0.1.0" },
@@ -103,7 +110,9 @@ async function main(): Promise<void> {
 
     try {
       const config = loadConfig();
-      const result = await archiveConversation(config, parsed.data);
+      const result = await processingQueue.enqueue(() =>
+        archiveConversation(config, parsed.data),
+      );
       return {
         content: [
           {
