@@ -9,12 +9,14 @@
   },
   "bin": {
     "kh": "dist/bin/cli.js",
-    "kh-mcp": "dist/bin/mcp-server.js"
+    "kh-mcp": "dist/bin/mcp-server.js",
+    "kh-worker": "dist/bin/worker.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json --resolve-full-paths",
+    "build": "tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json --resolve-full-paths && node scripts/copy-prompts.mjs",
     "dev:mcp": "tsx src/bin/mcp-server.ts",
     "dev:cli": "tsx src/bin/cli.ts",
+    "dev:worker": "tsx src/bin/worker.ts",
     "pretest": "node -e \"require('fs').rmSync('test_result',{recursive:true,force:true})\"",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -22,6 +24,7 @@
     "lint:fix": "eslint . --fix"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.92.0",
     "@modelcontextprotocol/sdk": "^1.0.4",
     "gray-matter": "^4.0.3",
     "simple-git": "^3.27.0",

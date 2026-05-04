@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { join } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -9,6 +10,8 @@ import { Role } from "@constants/role";
 import { Source } from "@constants/source";
 import { archiveConversation } from "@core/archive";
 import { loadConfig } from "@core/config";
+import { newId } from "@core/ids";
+import { FsQueue } from "@core/queue/fs-queue";
 import { SequentialQueue } from "@core/queue/sequential-queue";
 import { ArchiveInputSchema } from "@core/schema";
 
@@ -61,9 +64,8 @@ const archiveInputJsonSchema = {
 } as const;
 
 // One queue for the lifetime of the MCP server process. Every conversation-
-// processing request runs through it so the pipeline (write → commit → future
-// classify/synthesize) stays strictly sequential and free of race conditions
-// on shared resources (git index, future entity pages).
+// processing request runs through it so the raw write + git commit stays
+// strictly sequential and free of git index races.
 const processingQueue = new SequentialQueue();
 
 async function main(): Promise<void> {
@@ -77,7 +79,7 @@ async function main(): Promise<void> {
       {
         name: ARCHIVE_TOOL_NAME,
         description:
-          "Archive a normalized conversation into the knowledge-hub vault as raw markdown.",
+          "Archive a normalized conversation into the knowledge-hub vault as raw markdown. When classification is enabled, also enqueues a fire-and-forget classification job consumed by `kh worker`.",
         inputSchema: archiveInputJsonSchema,
       },
     ],
@@ -113,15 +115,30 @@ async function main(): Promise<void> {
       const result = await processingQueue.enqueue(() =>
         archiveConversation(config, parsed.data),
       );
+
+      let jobId: string | undefined;
+      if (config.classification.enabled) {
+        const fsQueue = new FsQueue(join(config.vault.path, "_queue"));
+        jobId = await fsQueue.enqueue({
+          id: newId(),
+          type: "classify",
+          payload: {
+            conversation_id: result.conversation.id,
+            conversation_path: result.relativePath,
+          },
+        });
+      }
+
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify(
               {
-                id: result.conversation.id,
+                conversation_id: result.conversation.id,
                 path: result.relativePath,
                 committed: result.committed,
+                ...(jobId ? { job_id: jobId } : {}),
               },
               null,
               2,

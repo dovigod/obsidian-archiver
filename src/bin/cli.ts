@@ -5,6 +5,7 @@ import {
   parseTranscriptFile,
   transcriptToArchiveInput,
 } from "@core/transcript";
+import { runWorker } from "@core/worker";
 
 interface ParsedArgs {
   command: string | undefined;
@@ -79,9 +80,12 @@ function printUsage(): void {
       "Usage:",
       "  kh archive-transcript <transcript.jsonl> [--project NAME]... [--tag TAG]...",
       "                                          [--topic TOPIC]... [--vault PATH]",
+      "  kh worker [--once] [--poll-ms MS]",
       "  kh --help",
       "",
-      "Stage 1 only: archives a Claude Code JSONL transcript into the vault.",
+      "Subcommands:",
+      "  archive-transcript   Archive a Claude Code JSONL transcript into the vault (Stage 1).",
+      "  worker               Drain the classification queue (Stage 2). Long-running.",
       "",
     ].join("\n"),
   );
@@ -126,6 +130,17 @@ async function runArchiveTranscript(args: ParsedArgs): Promise<number> {
   return 0;
 }
 
+async function runWorkerCommand(args: ParsedArgs): Promise<number> {
+  const once = args.options.once === true;
+  const pollOpt = asString(args.options["poll-ms"]);
+  const pollIntervalMs = pollOpt ? Number(pollOpt) : undefined;
+  await runWorker({
+    once,
+    ...(pollIntervalMs ? { pollIntervalMs } : {}),
+  });
+  return 0;
+}
+
 async function main(): Promise<number> {
   const args = parseArgs(process.argv.slice(2));
   if (args.options.help || args.command === "help" || !args.command) {
@@ -135,6 +150,8 @@ async function main(): Promise<number> {
   switch (args.command) {
     case "archive-transcript":
       return runArchiveTranscript(args);
+    case "worker":
+      return runWorkerCommand(args);
     default:
       process.stderr.write(`error: unknown command "${args.command}"\n`);
       printUsage();
