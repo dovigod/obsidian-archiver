@@ -208,3 +208,81 @@ tsconfig.json
 3. Page identity stability — entity-name filenames are MVP; restructuring carries link-rewrite step. Switch to uuid-based filenames if rename churn becomes a problem.
 4. LLM-rewrite quality — heavy reliance on prompt engineering; mitigated by mandatory git auto-commit.
 5. Cross-process git collisions — `autoCommit` retries `index.lock` 3x with backoff. If concurrent Stop hooks ever exhaust retries in practice, add a vault-level lockfile (`vault/.kh.lock` via atomic mkdir) before falling back to a filesystem queue at this layer.
+
+## Classification: prompt I/O contract
+
+Stage 2 classifies each entity extracted from a conversation by calling an LLM with the prompt at `src/core/llm/prompts/classify.md`. The classifier maintains the ontology — it picks the primary parent category, lists additional indexes, detects duplicates against existing entities, proposes new categories when nothing fits, and flags rebalancing actions. `pipeline/classify.ts` parses its JSON output with a zod schema in `src/core/schema.ts` and hands the decision to the executor, which either applies it or stages it under `vault/_proposals/` according to `mode`.
+
+**Input** (constructed by `pipeline/resolve.ts`, capped at `entity_resolution.graph_max_entities` neighbors):
+
+```jsonc
+{
+  "new_node": { "name": "", "summary": "", "tags": [], "aliases": [] },
+  "candidate_categories": [
+    { "id": "", "name": "", "summary": "", "path": [], "sibling_examples": [], "similarity_score": 0.0 }
+  ],
+  "candidate_entities": [
+    { "id": "", "name": "", "summary": "", "aliases": [] }
+  ],
+  "nearby_nodes": [{ "name": "", "relation": "", "summary": "" }],
+  "existing_relations": [],
+  "ontology_rules": [],
+  "autonomy_policy": {
+    "auto_actions":     ["create_entity", "update_entity", "add_to_index"],
+    "proposal_actions": ["split_category", "merge_entities", "rename_entity", "delete_page", "create_category"]
+  },
+  "confidence_thresholds": { "auto_min": 0.75, "propose_min": 0.45 },
+  "ontology_health_signals": { "category_entropy": {}, "sibling_coherence": {}, "overloaded_categories": [] }
+}
+```
+
+**Output:**
+
+```jsonc
+{
+  "decision": {
+    "is_duplicate_of": null,
+    "primary_parent_id": "",
+    "primary_parent_name": "",
+    "additional_index_ids": [],
+    "additional_index_names": [],
+    "new_category_proposal": null,    // { name, parent_id, summary, rationale } | null
+    "aliases": [],
+    "secondary_relations": [
+      { "target_id": "", "target_name": "", "relation": "" }
+    ],
+    "confidence": 0.0
+  },
+  "mode": "auto",                     // "auto" | "proposal"
+  "reasoning": {
+    "semantic_fit": "",
+    "sibling_analysis": "",
+    "rejected_candidates": [{ "candidate_id": "", "reason": "" }],
+    "ontology_considerations": ""
+  },
+  "rebalancing": {
+    "needed": false,
+    "reasons": [],
+    "actions": [{ "type": "move|split|merge|rename|create_category", "target_id": "", "details": "" }]
+  },
+  "warnings": []
+}
+```
+
+**Field → executor action mapping:**
+
+| Output field | Auto action (`mode=auto`) | Proposal action (`mode=proposal`) |
+|---|---|---|
+| `decision.primary_parent_id` + `additional_index_ids` | `add_to_index` for each | staged under `_proposals/` |
+| `decision.is_duplicate_of` | link aliases on existing entity, skip create | staged under `_proposals/` |
+| `decision.new_category_proposal` | — (always proposal) | staged under `_proposals/` |
+| `decision.aliases` | written to entity frontmatter | — |
+| `rebalancing.actions[]` (split/merge/rename/delete) | — (always proposal) | staged under `_proposals/` |
+
+**Mode selection** is decided inside the prompt, not by the executor. The classifier sees `autonomy_policy` and `confidence_thresholds` and emits `mode` accordingly: `auto` only when confidence ≥ `auto_min`, no rebalancing is needed, and every implied action is in `auto_actions`; otherwise `proposal`. This keeps autonomy gating in one place — the prompt — instead of scattering threshold checks across the pipeline.
+
+**Validation.** Output is parsed with a zod schema mirroring the JSON above. Schema-validation failure triggers exactly one retry with a follow-up message containing the validation error; a second failure falls back to `mode=proposal` with the raw text attached to the proposal file.
+
+**Graph-size cap.** `pipeline/resolve.ts` pre-filters the neighborhood (keyword retrieval today, sqlite-vec later — see Deferred risks #2) so the prompt always receives a bounded slice, never the full vault graph. The 500-entity cap from `config.entity_resolution.graph_max_entities` is enforced at the resolver, not the classifier.
+
+> Stage 2 in the *Staged build* table refers to this section — the LLM classification step is governed by the contract documented here.
