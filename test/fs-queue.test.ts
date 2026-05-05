@@ -1,7 +1,6 @@
-import { strict as assert } from "node:assert";
 import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { describe, expect, it } from "vitest";
 import { FsQueue } from "@core/queue/fs-queue";
 import { testTmpDir } from "./helpers";
 
@@ -12,14 +11,14 @@ describe("FsQueue", () => {
     await q.enqueue({ id: "j1", type: "classify", payload: { x: 1 } });
 
     const claimed = await q.claim();
-    assert.equal(claimed?.id, "j1");
-    assert.equal(claimed?.type, "classify");
-    assert.deepEqual(claimed?.payload, { x: 1 });
+    expect(claimed?.id).toBe("j1");
+    expect(claimed?.type).toBe("classify");
+    expect(claimed?.payload).toEqual({ x: 1 });
 
     await q.complete("j1");
-    assert.equal((await q.list("done")).length, 1);
-    assert.equal((await q.list("pending")).length, 0);
-    assert.equal((await q.list("running")).length, 0);
+    expect((await q.list("done")).length).toBe(1);
+    expect((await q.list("pending")).length).toBe(0);
+    expect((await q.list("running")).length).toBe(0);
   });
 
   it("FIFO via lexicographic sort (uuid v7 is time-ordered)", async () => {
@@ -32,9 +31,9 @@ describe("FsQueue", () => {
     const a = await q.claim();
     const b = await q.claim();
     const c = await q.claim();
-    assert.equal(a?.id, "0001");
-    assert.equal(b?.id, "0002");
-    assert.equal(c?.id, "0003");
+    expect(a?.id).toBe("0001");
+    expect(b?.id).toBe("0002");
+    expect(c?.id).toBe("0003");
   });
 
   it("two concurrent claimers don't both get the same job", async () => {
@@ -45,8 +44,8 @@ describe("FsQueue", () => {
 
     const [a, b] = await Promise.all([q1.claim(), q2.claim()]);
     const winners = [a, b].filter((j): j is NonNullable<typeof a> => j !== null);
-    assert.equal(winners.length, 1, "exactly one claimer should win");
-    assert.equal(winners[0]?.id, "only");
+    expect(winners.length).toBe(1);
+    expect(winners[0]?.id).toBe("only");
   });
 
   it("fail moves job to failed/ with attempts incremented and error attached", async () => {
@@ -57,16 +56,16 @@ describe("FsQueue", () => {
     await q.fail("boom", "kaboom");
 
     const failed = await q.list("failed");
-    assert.equal(failed.length, 1);
-    assert.equal(failed[0]?.attempts, 1);
-    assert.match(failed[0]?.error ?? "", /kaboom/);
-    assert.equal((await q.list("running")).length, 0);
-    assert.equal((await q.list("pending")).length, 0);
+    expect(failed.length).toBe(1);
+    expect(failed[0]?.attempts).toBe(1);
+    expect(failed[0]?.error ?? "").toMatch(/kaboom/);
+    expect((await q.list("running")).length).toBe(0);
+    expect((await q.list("pending")).length).toBe(0);
   });
 
   it("returns null when no pending jobs", async () => {
     const dir = mkdtempSync(join(testTmpDir(), "fsq-empty-"));
     const q = new FsQueue(dir);
-    assert.equal(await q.claim(), null);
+    expect(await q.claim()).toBeNull();
   });
 });

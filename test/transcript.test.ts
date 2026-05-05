@@ -1,5 +1,4 @@
-import { strict as assert } from "node:assert";
-import { describe, it } from "node:test";
+import { describe, expect, it } from "vitest";
 import { parseTranscriptText } from "@core/transcript";
 
 describe("parseTranscriptText", () => {
@@ -34,16 +33,16 @@ describe("parseTranscriptText", () => {
     ].join("\n");
 
     const parsed = parseTranscriptText(jsonl);
-    assert.equal(parsed.messages.length, 2);
-    assert.equal(parsed.messages[0]!.role, "user");
-    assert.match(parsed.messages[0]!.content, /Why is X stuck/);
-    assert.equal(parsed.messages[1]!.role, "assistant");
-    assert.match(parsed.messages[1]!.content, /Replica lag/);
-    assert.match(parsed.messages[1]!.content, /\[tool_use:Bash\]/);
-    assert.equal(parsed.cwd, "/repo/tada-wallet");
-    assert.equal(parsed.model, "claude-opus-4-7");
-    assert.equal(parsed.git?.branch, "main");
-    assert.equal(parsed.startedAt, "2026-05-02T14:22:00.000Z");
+    expect(parsed.messages.length).toBe(2);
+    expect(parsed.messages[0]!.role).toBe("user");
+    expect(parsed.messages[0]!.content).toMatch(/Why is X stuck/);
+    expect(parsed.messages[1]!.role).toBe("assistant");
+    expect(parsed.messages[1]!.content).toMatch(/Replica lag/);
+    expect(parsed.messages[1]!.content).toMatch(/\[tool_use:Bash\]/);
+    expect(parsed.cwd).toBe("/repo/tada-wallet");
+    expect(parsed.model).toBe("claude-opus-4-7");
+    expect(parsed.git?.branch).toBe("main");
+    expect(parsed.startedAt).toBe("2026-05-02T14:22:00.000Z");
   });
 
   it("ignores blank lines and unparseable lines", () => {
@@ -53,7 +52,7 @@ describe("parseTranscriptText", () => {
       JSON.stringify({ role: "user", content: "hi" }),
     ].join("\n");
     const parsed = parseTranscriptText(jsonl);
-    assert.equal(parsed.messages.length, 1);
+    expect(parsed.messages.length).toBe(1);
   });
 
   it("drops messages with empty content", () => {
@@ -62,7 +61,7 @@ describe("parseTranscriptText", () => {
       JSON.stringify({ role: "assistant", content: "ok" }),
     ].join("\n");
     const parsed = parseTranscriptText(jsonl);
-    assert.equal(parsed.messages.length, 1);
-    assert.equal(parsed.messages[0]!.role, "assistant");
+    expect(parsed.messages.length).toBe(1);
+    expect(parsed.messages[0]!.role).toBe("assistant");
   });
 });

@@ -1,4 +1,3 @@
-import { strict as assert } from "node:assert";
 import {
   mkdtempSync,
   readFileSync,
@@ -7,9 +6,9 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { describe, it } from "node:test";
 import matter from "gray-matter";
 import { simpleGit } from "simple-git";
+import { describe, expect, it } from "vitest";
 import { archiveConversation } from "@core/archive";
 import { loadConfig } from "@core/config";
 import { autoCommit } from "@core/git";
@@ -40,19 +39,18 @@ describe("archiveConversation (Stage 1)", () => {
       ],
     });
 
-    assert.match(
-      result.relativePath,
+    expect(result.relativePath).toMatch(
       /^raw\/conversations\/2026\/05\/[0-9a-f-]+\.md$/,
     );
     const text = readFileSync(result.absolutePath, "utf8");
     const parsed = matter(text);
-    assert.equal(parsed.data.source, "claude-code");
-    assert.equal(parsed.data.id, result.conversation.id);
-    assert.deepEqual(parsed.data.project, ["tada-wallet"]);
-    assert.deepEqual(parsed.data.topics, ["redis"]); // dedup + trim
-    assert.match(parsed.content, /# User\n/);
-    assert.match(parsed.content, /# Assistant\n/);
-    assert.equal(result.committed, false);
+    expect(parsed.data.source).toBe("claude-code");
+    expect(parsed.data.id).toBe(result.conversation.id);
+    expect(parsed.data.project).toEqual(["tada-wallet"]);
+    expect(parsed.data.topics).toEqual(["redis"]); // dedup + trim
+    expect(parsed.content).toMatch(/# User\n/);
+    expect(parsed.content).toMatch(/# Assistant\n/);
+    expect(result.committed).toBe(false);
   });
 
   it("rejects empty message arrays via schema", async () => {
@@ -65,12 +63,12 @@ describe("archiveConversation (Stage 1)", () => {
       },
     });
 
-    await assert.rejects(
+    await expect(
       archiveConversation(config, {
         source: "manual",
         messages: [],
       }),
-    );
+    ).rejects.toThrow();
   });
 
   it("serializes concurrent archives via SequentialQueue (10 calls, 10 commits)", async () => {
@@ -102,18 +100,18 @@ describe("archiveConversation (Stage 1)", () => {
       ),
     );
 
-    assert.equal(results.length, N);
+    expect(results.length).toBe(N);
     const ids = new Set(results.map((r) => r.conversation.id));
-    assert.equal(ids.size, N, "every archive should get a unique uuid v7 id");
+    expect(ids.size).toBe(N);
     for (const r of results) {
-      assert.equal(r.committed, true, `result ${r.conversation.id} not committed`);
+      expect(r.committed).toBe(true);
     }
 
     const files = readdirSync(join(vault, "raw", "conversations", "2026", "05"));
-    assert.equal(files.length, N);
+    expect(files.length).toBe(N);
 
     const log = await simpleGit({ baseDir: vault }).log();
-    assert.equal(log.total, N);
+    expect(log.total).toBe(N);
   });
 });
 
@@ -122,23 +120,19 @@ describe("autoCommit", () => {
     const dir = mkdtempSync(join(testTmpDir(), "git-indexlock-retry-"));
     const vault = dir;
     await prepareVaultRepo(vault);
-    // Seed the repo with one commit so HEAD exists and .git/ is bootstrapped.
     writeFileSync(join(vault, "seed.md"), "seed");
     const seeded = await autoCommit({
       vaultPath: vault,
       files: [join(vault, "seed.md")],
       message: "seed",
     });
-    assert.equal(seeded, true);
+    expect(seeded).toBe(true);
 
-    // Drop a fake lock; remove it during the retry backoff window so the
-    // second or third attempt succeeds.
     const lockPath = join(vault, ".git", "index.lock");
     writeFileSync(lockPath, "");
     setTimeout(() => {
       rmSync(lockPath, { force: true });
-    }, 80); // first retry sleeps 50ms → second attempt at ~50ms still locked,
-    // lock cleared at 80ms, third attempt at ~200ms succeeds.
+    }, 80);
 
     writeFileSync(join(vault, "next.md"), "next");
     const committed = await autoCommit({
@@ -146,6 +140,6 @@ describe("autoCommit", () => {
       files: [join(vault, "next.md")],
       message: "after-retry",
     });
-    assert.equal(committed, true);
+    expect(committed).toBe(true);
   });
 });

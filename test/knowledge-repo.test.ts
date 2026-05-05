@@ -1,8 +1,7 @@
-import { strict as assert } from "node:assert";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, it } from "node:test";
 import matter from "gray-matter";
+import { describe, expect, it } from "vitest";
 import {
   type EntityPage,
   KnowledgeRepository,
@@ -14,6 +13,11 @@ function makePage(overrides: Partial<EntityPage> = {}): EntityPage {
     id: "01923-test",
     name: "Redis",
     categories: ["Database", "Caching"],
+    aliases: [],
+    primary_parent_id: null,
+    primary_parent_name: null,
+    additional_index_ids: [],
+    additional_index_names: [],
     sources: [
       {
         id: "conv-1",
@@ -33,19 +37,18 @@ describe("KnowledgeRepository", () => {
     const repo = new KnowledgeRepository(dir);
     const { absolutePath, relativePath } = await repo.writeEntity(makePage());
 
-    assert.equal(relativePath, join("knowledge", "Redis.md"));
+    expect(relativePath).toBe(join("knowledge", "Redis.md"));
 
     const text = readFileSync(absolutePath, "utf8");
     const parsed = matter(text);
-    assert.equal(parsed.data.id, "01923-test");
-    assert.equal(parsed.data.name, "Redis");
-    assert.deepEqual(parsed.data.categories, ["Database", "Caching"]);
-    assert.match(parsed.content, /^# Redis/m);
-    assert.match(parsed.content, /## Overview/);
-    assert.match(parsed.content, /## Notes/);
-    assert.match(parsed.content, /## Sources/);
-    assert.match(
-      parsed.content,
+    expect(parsed.data.id).toBe("01923-test");
+    expect(parsed.data.name).toBe("Redis");
+    expect(parsed.data.categories).toEqual(["Database", "Caching"]);
+    expect(parsed.content).toMatch(/^# Redis/m);
+    expect(parsed.content).toMatch(/## Overview/);
+    expect(parsed.content).toMatch(/## Notes/);
+    expect(parsed.content).toMatch(/## Sources/);
+    expect(parsed.content).toMatch(
       /\[\[raw\/conversations\/2026\/05\/conv-1\|2026-05-02 — first\]\]/,
     );
   });
@@ -56,22 +59,21 @@ describe("KnowledgeRepository", () => {
     await repo.writeEntity(makePage());
 
     const back = await repo.readEntity("Redis");
-    assert.ok(back);
-    assert.equal(back?.id, "01923-test");
-    assert.equal(back?.name, "Redis");
-    assert.deepEqual(back?.categories, ["Database", "Caching"]);
-    assert.equal(back?.sources?.length, 1);
-    assert.equal(back?.sources?.[0]?.id, "conv-1");
-    // body should NOT contain the H1 or the Sources section that we manage.
-    assert.doesNotMatch(back?.body ?? "", /^# Redis/m);
-    assert.doesNotMatch(back?.body ?? "", /## Sources/);
-    assert.match(back?.body ?? "", /## Overview/);
+    expect(back).toBeTruthy();
+    expect(back?.id).toBe("01923-test");
+    expect(back?.name).toBe("Redis");
+    expect(back?.categories).toEqual(["Database", "Caching"]);
+    expect(back?.sources?.length).toBe(1);
+    expect(back?.sources?.[0]?.id).toBe("conv-1");
+    expect(back?.body ?? "").not.toMatch(/^# Redis/m);
+    expect(back?.body ?? "").not.toMatch(/## Sources/);
+    expect(back?.body ?? "").toMatch(/## Overview/);
   });
 
   it("readEntity returns null when not present", async () => {
     const dir = mkdtempSync(join(testTmpDir(), "knrepo-missing-"));
     const repo = new KnowledgeRepository(dir);
-    assert.equal(await repo.readEntity("DoesNotExist"), null);
+    expect(await repo.readEntity("DoesNotExist")).toBeNull();
   });
 
   it("listEntities surfaces names + categories", async () => {
@@ -96,7 +98,7 @@ describe("KnowledgeRepository", () => {
     );
     const list = await repo.listEntities();
     const names = list.map((e) => e.name).sort();
-    assert.deepEqual(names, ["OAuth2", "Redis"]);
+    expect(names).toEqual(["OAuth2", "Redis"]);
   });
 
   it("entity name with spaces slugifies safely (Redis Cluster -> Redis_Cluster.md)", async () => {
@@ -105,6 +107,6 @@ describe("KnowledgeRepository", () => {
     const { relativePath } = await repo.writeEntity(
       makePage({ name: "Redis Cluster", sources: [] }),
     );
-    assert.equal(relativePath, join("knowledge", "Redis_Cluster.md"));
+    expect(relativePath).toBe(join("knowledge", "Redis_Cluster.md"));
   });
 });

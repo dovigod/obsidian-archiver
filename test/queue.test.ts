@@ -1,5 +1,4 @@
-import { strict as assert } from "node:assert";
-import { describe, it } from "node:test";
+import { describe, expect, it } from "vitest";
 import { SequentialQueue } from "@core/queue/sequential-queue";
 
 function deferred<T>(): {
@@ -22,8 +21,6 @@ describe("SequentialQueue", () => {
     const order: number[] = [];
     const promises = Array.from({ length: 10 }, (_, i) =>
       queue.enqueue(async () => {
-        // Force interleaving opportunity: each job awaits a microtask + a real
-        // tick before recording its index.
         await Promise.resolve();
         await new Promise((r) => setTimeout(r, 1));
         order.push(i);
@@ -31,22 +28,22 @@ describe("SequentialQueue", () => {
       }),
     );
     const results = await Promise.all(promises);
-    assert.deepEqual(order, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    assert.deepEqual(results, [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(order).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(results).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 
   it("never overlaps jobs (only one runs at a time)", async () => {
     const queue = new SequentialQueue();
     let active = 0;
     let maxActive = 0;
-    const job = async () => {
+    const job = async (): Promise<void> => {
       active++;
       maxActive = Math.max(maxActive, active);
       await new Promise((r) => setTimeout(r, 5));
       active--;
     };
     await Promise.all(Array.from({ length: 5 }, () => queue.enqueue(job)));
-    assert.equal(maxActive, 1);
+    expect(maxActive).toBe(1);
   });
 
   it("isolates failures: one job throwing does not break the next", async () => {
@@ -55,8 +52,8 @@ describe("SequentialQueue", () => {
       throw new Error("boom");
     });
     const succeeding = queue.enqueue(async () => 42);
-    await assert.rejects(failing, /boom/);
-    assert.equal(await succeeding, 42);
+    await expect(failing).rejects.toThrow(/boom/);
+    expect(await succeeding).toBe(42);
   });
 
   it("depth reflects pending + running jobs", async () => {
@@ -67,10 +64,9 @@ describe("SequentialQueue", () => {
     });
     const second = queue.enqueue(async () => 2);
     const third = queue.enqueue(async () => 3);
-    // First is running, second and third are pending → depth === 3.
-    assert.equal(queue.depth, 3);
+    expect(queue.depth).toBe(3);
     gate.resolve();
     await Promise.all([first, second, third]);
-    assert.equal(queue.depth, 0);
+    expect(queue.depth).toBe(0);
   });
 });

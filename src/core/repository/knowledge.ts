@@ -14,7 +14,20 @@ export interface ConversationLink {
 export interface EntityPage {
   id: string;
   name: string;
+  /**
+   * Flat list of category names. Mirrors `primary_parent_name` +
+   * `additional_index_names` for backwards compatibility with Stage 3 index
+   * derivation. Maintained as the union of the two.
+   */
   categories: string[];
+  /** Synonyms, alternate spellings, harvested by the classifier. */
+  aliases: string[];
+  /** Intrinsic parent category id chosen by the classifier (or null when unfit). */
+  primary_parent_id: string | null;
+  primary_parent_name: string | null;
+  /** Other categories the entity is also indexed under. */
+  additional_index_ids: string[];
+  additional_index_names: string[];
   sources: ConversationLink[];
   updated_at: string;
   /** Markdown body without frontmatter, without leading H1, without ## Sources. */
@@ -27,8 +40,14 @@ export interface EntityWriteResult {
 }
 
 export interface EntitySummary {
+  id: string;
   name: string;
   categories: string[];
+  aliases: string[];
+  primary_parent_id: string | null;
+  primary_parent_name: string | null;
+  additional_index_ids: string[];
+  additional_index_names: string[];
 }
 
 /**
@@ -75,6 +94,13 @@ function stripSourcesSection(body: string): string {
   return body.slice(0, idx).replace(/\s+$/, "") + "\n";
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((v): v is string => typeof v === "string");
+}
+
 export class KnowledgeRepository {
   constructor(private readonly vaultPath: string) {}
 
@@ -99,9 +125,20 @@ export class KnowledgeRepository {
       const parsed = matter(text);
       const name =
         (parsed.data.name as string | undefined) ?? file.replace(/\.md$/, "");
-      const categories =
-        (parsed.data.categories as string[] | undefined) ?? [];
-      out.push({ name, categories });
+      out.push({
+        id: String(parsed.data.id ?? ""),
+        name,
+        categories: asStringArray(parsed.data.categories),
+        aliases: asStringArray(parsed.data.aliases),
+        primary_parent_id:
+          (parsed.data.primary_parent_id as string | null | undefined) ?? null,
+        primary_parent_name:
+          (parsed.data.primary_parent_name as string | null | undefined) ?? null,
+        additional_index_ids: asStringArray(parsed.data.additional_index_ids),
+        additional_index_names: asStringArray(
+          parsed.data.additional_index_names,
+        ),
+      });
     }
     return out;
   }
@@ -120,7 +157,16 @@ export class KnowledgeRepository {
     return {
       id: String(parsed.data.id ?? ""),
       name: canonicalName,
-      categories: (parsed.data.categories as string[] | undefined) ?? [],
+      categories: asStringArray(parsed.data.categories),
+      aliases: asStringArray(parsed.data.aliases),
+      primary_parent_id:
+        (parsed.data.primary_parent_id as string | null | undefined) ?? null,
+      primary_parent_name:
+        (parsed.data.primary_parent_name as string | null | undefined) ?? null,
+      additional_index_ids: asStringArray(parsed.data.additional_index_ids),
+      additional_index_names: asStringArray(
+        parsed.data.additional_index_names,
+      ),
       sources:
         (parsed.data.sources as ConversationLink[] | undefined) ?? [],
       updated_at: String(parsed.data.updated_at ?? ""),
@@ -135,6 +181,11 @@ export class KnowledgeRepository {
       id: page.id,
       name: page.name,
       categories: page.categories,
+      aliases: page.aliases,
+      primary_parent_id: page.primary_parent_id,
+      primary_parent_name: page.primary_parent_name,
+      additional_index_ids: page.additional_index_ids,
+      additional_index_names: page.additional_index_names,
       sources: page.sources,
       updated_at: page.updated_at,
     };

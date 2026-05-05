@@ -9,8 +9,8 @@ const PROMPTS_DIR = join(here, "prompts");
 
 export type PromptName =
   | "obsidian-markdown"
+  | "extract"
   | "classify"
-  | "resolve"
   | "synthesize";
 
 const cache = new Map<PromptName, string>();

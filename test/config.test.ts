@@ -1,7 +1,6 @@
-import { strict as assert } from "node:assert";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { describe, expect, it } from "vitest";
 import { deepMerge, loadConfig } from "@core/config";
 import { testTmpDir } from "./helpers";
 
@@ -11,12 +10,12 @@ describe("deepMerge", () => {
       { a: 1, nested: { x: 1, y: 2 } },
       { nested: { y: 99, z: 3 } },
     );
-    assert.deepEqual(out, { a: 1, nested: { x: 1, y: 99, z: 3 } });
+    expect(out).toEqual({ a: 1, nested: { x: 1, y: 99, z: 3 } });
   });
 
   it("override wins for primitives and arrays", () => {
     const out = deepMerge({ list: [1, 2, 3], n: 1 }, { list: [9], n: 2 });
-    assert.deepEqual(out, { list: [9], n: 2 });
+    expect(out).toEqual({ list: [9], n: 2 });
   });
 });
 
@@ -30,10 +29,10 @@ describe("loadConfig", () => {
     );
 
     const cfg = loadConfig({ projectRoot: dir, skipGlobal: true });
-    assert.equal(cfg.vault.path, join(dir, "vault"));
-    assert.equal(cfg.capture.mode, "auto");
-    assert.equal(cfg.classification.llm.provider, "claude");
-    assert.equal(cfg.git.auto_commit, true);
+    expect(cfg.vault.path).toBe(join(dir, "vault"));
+    expect(cfg.capture.mode).toBe("auto");
+    expect(cfg.classification.llm.provider).toBe("claude");
+    expect(cfg.git.auto_commit).toBe(true);
   });
 
   it("project config overrides global", () => {
@@ -49,14 +48,13 @@ describe("loadConfig", () => {
       skipGlobal: true,
       overrides: { vault: { path: join(dir, "vault") } },
     });
-    assert.equal(cfg.capture.mode, "manual");
-    assert.equal(cfg.vault.path, join(dir, "vault"));
+    expect(cfg.capture.mode).toBe("manual");
+    expect(cfg.vault.path).toBe(join(dir, "vault"));
   });
 
   it("rejects missing vault.path", () => {
     const dir = mkdtempSync(join(testTmpDir(), "cfg-reject-no-vault-"));
-    assert.throws(
-      () => loadConfig({ projectRoot: dir, skipGlobal: true }),
+    expect(() => loadConfig({ projectRoot: dir, skipGlobal: true })).toThrow(
       /Invalid knowledge-hub config/,
     );
   });

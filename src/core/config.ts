@@ -45,6 +45,12 @@ export const ConfigSchema = z.object({
           model: "claude-opus-4-7",
           api_key_env: "ANTHROPIC_API_KEY",
         }),
+      confidence_thresholds: z
+        .object({
+          auto_min: z.number().min(0).max(1).default(0.75),
+          propose_min: z.number().min(0).max(1).default(0.45),
+        })
+        .default({ auto_min: 0.75, propose_min: 0.45 }),
     })
     .default({
       enabled: true,
@@ -54,6 +60,7 @@ export const ConfigSchema = z.object({
         model: "claude-opus-4-7",
         api_key_env: "ANTHROPIC_API_KEY",
       },
+      confidence_thresholds: { auto_min: 0.75, propose_min: 0.45 },
     }),
   page_update_strategy: z
     .nativeEnum(PageUpdateStrategy)

@@ -1,9 +1,6 @@
 import type { LLMProvider } from "@core/llm/provider";
 import { loadPrompt, render } from "@core/llm/prompts";
-import {
-  type ClassifiedEntity,
-  conversationToText,
-} from "@core/pipeline/classify";
+import { conversationToText } from "@core/pipeline/extract";
 import type { EntityPage } from "@core/repository/knowledge";
 import type { Conversation } from "@core/schema";
 
@@ -12,11 +9,18 @@ const TOKEN_BUDGET_CHARS = 80_000 * 4;
 
 export interface SynthesizeArgs {
   entityName: string;
-  candidate: ClassifiedEntity;
+  /** 1-2 sentence summary of what this conversation contributed. */
+  summary: string;
   existing: EntityPage | null;
   conversation: Conversation;
 }
 
+/**
+ * LLM-rewrite step: pass the existing page body + new conversation to the
+ * synthesizer prompt and write back an integrated rewrite. Per design.md:
+ * "Preserve existing facts unless contradicted." When the combined input
+ * would blow the token budget, summarize the older body first.
+ */
 export async function synthesizeEntityBody(
   llm: LLMProvider,
   args: SynthesizeArgs,
@@ -38,7 +42,7 @@ export async function synthesizeEntityBody(
     obsidian_markdown: obsidianRef,
     entity_name: args.entityName,
     existing: existingBody,
-    summary: args.candidate.summary,
+    summary: args.summary,
     conversation: convText,
   });
   const text = await llm.complete({ prompt, maxTokens: 8192 });

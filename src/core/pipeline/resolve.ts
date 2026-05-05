@@ -1,76 +1,209 @@
-import type { LLMProvider } from "@core/llm/provider";
-import { loadPrompt, render } from "@core/llm/prompts";
-import type { ClassifiedEntity } from "@core/pipeline/classify";
-import { extractJson } from "@core/pipeline/json";
-
-export interface ResolveResult {
-  match: string | null;
-  reason?: string;
-}
-
-export interface KnowledgeGraphEntry {
-  name: string;
-  categories: string[];
-}
-
-const GRAPH_LIMIT = 500;
+import type { Config } from "@core/config";
+import type { EntitySummary } from "@core/repository/knowledge";
+import {
+  type CandidateCategory,
+  type CandidateEntity,
+  type ClassifyInput,
+  type ExtractedEntity,
+} from "@core/schema";
 
 /**
- * Decide whether `candidate` matches an entity already in `graph`. When the
- * graph is empty we short-circuit to {match: null} without an LLM call.
+ * Cap on `candidate_entities` AND `candidate_categories` shipped to the
+ * classifier. Pulled from `config.entity_resolution.graph_max_entities`.
  *
- * When the graph exceeds GRAPH_LIMIT, we keyword-prefilter to keep the prompt
- * small. (Stage 5 will swap this for vector retrieval.)
+ * Stage 5 will swap the keyword-retrieval prefilter for vector retrieval; the
+ * cap stays in place either way so the prompt always receives a bounded slice.
  */
-export async function resolveEntity(
-  llm: LLMProvider,
-  candidate: ClassifiedEntity,
-  graph: readonly KnowledgeGraphEntry[],
-): Promise<ResolveResult> {
-  if (graph.length === 0) {
-    return { match: null, reason: "empty graph" };
-  }
-  const limited = limitGraph(graph, candidate, GRAPH_LIMIT);
-  const tpl = await loadPrompt("resolve");
-  const prompt = render(tpl, {
-    graph: limited
-      .map((e) => `- ${e.name} (${e.categories.join(", ")})`)
-      .join("\n"),
-    name: candidate.name,
-    categories: candidate.categories.join(", "),
-    summary: candidate.summary,
-  });
-  const text = await llm.complete({ prompt, maxTokens: 256 });
-  const parsed = extractJson<{ match: string | null; reason?: string }>(text);
-  const result: ResolveResult = { match: parsed.match ?? null };
-  if (parsed.reason !== undefined) {
-    result.reason = parsed.reason;
-  }
-  return result;
+
+interface ScoredEntity {
+  entry: EntitySummary;
+  score: number;
 }
 
-function limitGraph(
-  graph: readonly KnowledgeGraphEntry[],
-  candidate: ClassifiedEntity,
-  limit: number,
-): KnowledgeGraphEntry[] {
-  if (graph.length <= limit) {
-    return [...graph];
+function tokenize(s: string): string[] {
+  return s
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+/**
+ * Lightweight overlap score in [0,1]. Used today as a stand-in for vector
+ * similarity. Exact token match is enough for the empty/small-graph regime.
+ */
+function similarity(a: readonly string[], b: readonly string[]): number {
+  if (a.length === 0 || b.length === 0) {
+    return 0;
   }
-  const tokens = new Set(
-    [candidate.name, ...candidate.categories]
-      .flatMap((s) => s.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean)),
-  );
-  const scored = graph.map((entry) => {
-    const haystack = `${entry.name} ${entry.categories.join(" ")}`.toLowerCase();
-    let score = 0;
-    for (const t of tokens) {
-      if (t && haystack.includes(t)) {
-        score++;
+  const aSet = new Set(a);
+  let hits = 0;
+  for (const t of b) {
+    if (aSet.has(t)) {
+      hits++;
+    }
+  }
+  // Jaccard-ish: shared / union of distinct tokens.
+  const union = new Set([...a, ...b]).size;
+  return union === 0 ? 0 : hits / union;
+}
+
+function categoryIdSlug(name: string): string {
+  return `cat_${name
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")}`;
+}
+
+/**
+ * Aggregate the existing graph into category-level candidates. Each unique
+ * category name across all entities becomes one candidate, scored by simple
+ * Jaccard overlap against the new node.
+ */
+function buildCandidateCategories(
+  newNode: ExtractedEntity,
+  graph: readonly EntitySummary[],
+): CandidateCategory[] {
+  const newTokens = [
+    ...tokenize(newNode.name),
+    ...newNode.tags.flatMap(tokenize),
+    ...tokenize(newNode.summary),
+  ];
+
+  const byName = new Map<string, CandidateCategory>();
+  for (const ent of graph) {
+    for (const cat of ent.categories) {
+      const id = categoryIdSlug(cat);
+      const existing = byName.get(cat);
+      if (existing) {
+        if (existing.sibling_examples.length < 5) {
+          existing.sibling_examples.push(ent.name);
+        }
+      } else {
+        const score = similarity(newTokens, [
+          ...tokenize(cat),
+          ...tokenize(ent.name),
+        ]);
+        byName.set(cat, {
+          id,
+          name: cat,
+          summary: "",
+          path: [],
+          sibling_examples: [ent.name],
+          similarity_score: Number(score.toFixed(4)),
+        });
       }
     }
-    return { entry, score };
+  }
+
+  return Array.from(byName.values());
+}
+
+/**
+ * Score every existing entity against the new node by name/alias overlap and
+ * keep the top-K. Replaces the prior LLM-driven `resolveEntity`; entity-level
+ * duplicate detection now happens inside the classifier prompt itself.
+ */
+function buildCandidateEntities(
+  newNode: ExtractedEntity,
+  graph: readonly EntitySummary[],
+  limit: number,
+): CandidateEntity[] {
+  if (graph.length === 0) {
+    return [];
+  }
+  const newTokens = [
+    ...tokenize(newNode.name),
+    ...newNode.aliases.flatMap(tokenize),
+  ];
+
+  const scored: ScoredEntity[] = graph.map((entry) => {
+    const entryTokens = [
+      ...tokenize(entry.name),
+      ...entry.aliases.flatMap(tokenize),
+    ];
+    return { entry, score: similarity(newTokens, entryTokens) };
   });
   scored.sort((a, b) => b.score - a.score);
-  return scored.slice(0, limit).map((s) => s.entry);
+
+  const top = scored.slice(0, limit);
+  return top
+    .filter((s) => s.score > 0 || top.length <= limit / 2)
+    .map((s) => ({
+      id: s.entry.id || s.entry.name,
+      name: s.entry.name,
+      summary: "",
+      aliases: s.entry.aliases,
+    }));
+}
+
+/**
+ * Truncate candidate categories to the global cap, preferring higher
+ * similarity scores. We rank both candidate sets together against the same
+ * limit since they share the prompt's token budget.
+ */
+function rankAndCap<T extends { similarity_score?: number }>(
+  items: T[],
+  limit: number,
+): T[] {
+  const scored: Array<{ item: T; score: number }> = items.map((item) => ({
+    item,
+    score: typeof item.similarity_score === "number" ? item.similarity_score : 0,
+  }));
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit).map((s) => s.item);
+}
+
+export interface BuildClassifyInputArgs {
+  config: Config;
+  newNode: ExtractedEntity;
+  graph: readonly EntitySummary[];
+}
+
+/**
+ * Build a ClassifyInput from the new node + existing graph + config.
+ *
+ * Pure data transform — no LLM call. The classifier prompt itself is
+ * responsible for picking the primary parent, detecting duplicates, deciding
+ * mode, and flagging rebalancing. This keeps autonomy gating in one place.
+ */
+export function buildClassifyInput({
+  config,
+  newNode,
+  graph,
+}: BuildClassifyInputArgs): ClassifyInput {
+  const cap = config.entity_resolution.graph_max_entities;
+
+  const allCategories = buildCandidateCategories(newNode, graph);
+  const candidate_categories = rankAndCap<CandidateCategory>(
+    allCategories,
+    cap,
+  );
+  const candidate_entities = buildCandidateEntities(newNode, graph, cap);
+
+  return {
+    new_node: {
+      name: newNode.name,
+      summary: newNode.summary,
+      tags: newNode.tags,
+      aliases: newNode.aliases,
+    },
+    candidate_categories,
+    candidate_entities,
+    nearby_nodes: [],
+    existing_relations: [],
+    ontology_rules: [],
+    autonomy_policy: {
+      auto_actions: config.autonomy.auto_actions,
+      proposal_actions: config.autonomy.proposal_actions,
+    },
+    confidence_thresholds: {
+      auto_min: config.classification.confidence_thresholds.auto_min,
+      propose_min: config.classification.confidence_thresholds.propose_min,
+    },
+    ontology_health_signals: {
+      category_entropy: {},
+      sibling_coherence: {},
+      overloaded_categories: [],
+    },
+  };
 }
