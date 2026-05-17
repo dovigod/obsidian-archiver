@@ -4,6 +4,7 @@ import { type Config, loadConfig } from "@core/config";
 import { createDb, type DB, type SqliteHandle } from "@core/db/client";
 import { JobsRepository, type ClaimedJob } from "@core/db/repository/jobs";
 import { ClaudeProvider } from "@core/llm/claude";
+import { ClaudeCliProvider } from "@core/llm/claude-cli";
 import type { LLMProvider } from "@core/llm/provider";
 import { runStage2Pipeline } from "@core/pipeline/run";
 
@@ -98,13 +99,24 @@ async function processJob(
 }
 
 function buildLLMFromConfig(config: Config): LLMProvider {
-  const apiKeyEnv = config.extract.llm.api_key_env;
-  const apiKey = process.env[apiKeyEnv];
-  if (!apiKey) {
-    throw new Error(`Missing API key: env var ${apiKeyEnv} is not set`);
+  const { provider, model } = config.extract.llm;
+
+  if (provider === "claude-cli") {
+    return new ClaudeCliProvider({
+      ...(model ? { model } : {}),
+    });
   }
-  return new ClaudeProvider({
-    apiKey,
-    model: config.extract.llm.model,
-  });
+
+  if (provider === "claude") {
+    const apiKeyEnv = config.extract.llm.api_key_env;
+    const apiKey = process.env[apiKeyEnv];
+    if (!apiKey) {
+      throw new Error(`Missing API key: env var ${apiKeyEnv} is not set`);
+    }
+    return new ClaudeProvider({ apiKey, model });
+  }
+
+  throw new Error(
+    `Unsupported LLM provider "${provider}". Use "claude" or "claude-cli".`,
+  );
 }

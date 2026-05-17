@@ -1,5 +1,6 @@
 export const LLMProvider = {
   Claude: "claude",
+  ClaudeCli: "claude-cli",
   OpenAI: "openai",
   Local: "local",
 } as const;
