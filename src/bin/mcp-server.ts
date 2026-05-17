@@ -10,8 +10,8 @@ import { Role } from "@constants/role";
 import { Source } from "@constants/source";
 import { archiveConversation } from "@core/archive";
 import { loadConfig } from "@core/config";
-import { newId } from "@core/ids";
-import { FsQueue } from "@core/queue/fs-queue";
+import { createDb } from "@core/db/client";
+import { JobsRepository } from "@core/db/repository/jobs";
 import { SequentialQueue } from "@core/queue/sequential-queue";
 import { ArchiveInputSchema } from "@core/schema";
 
@@ -19,8 +19,6 @@ const ARCHIVE_TOOL_NAME = "archive_conversation";
 
 const archiveInputJsonSchema = {
   type: "object",
-  // The enum lists below are derived from the @constants/* sources so the JSON
-  // Schema stays in sync with the zod schema and the const-object types.
   required: ["source", "messages"],
   properties: {
     source: {
@@ -65,10 +63,23 @@ const archiveInputJsonSchema = {
 
 // One queue for the lifetime of the MCP server process. Every conversation-
 // processing request runs through it so the raw write + git commit stays
-// strictly sequential and free of git index races.
+// strictly sequential.
 const processingQueue = new SequentialQueue();
 
 async function main(): Promise<void> {
+  const config = loadConfig();
+  const { db, sqlite } = createDb({
+    path: join(config.vault.path, config.storage.sqlite.path),
+    journalMode: config.storage.sqlite.journal_mode,
+    busyTimeoutMs: config.storage.sqlite.busy_timeout_ms,
+    synchronous: config.storage.sqlite.synchronous,
+    migrate: true,
+  });
+
+  // Recover any jobs left running from a prior crashed process.
+  const jobs = new JobsRepository(db, sqlite);
+  jobs.reclaimStuck();
+
   const server = new Server(
     { name: "knowledge-hub", version: "0.1.0" },
     { capabilities: { tools: {} } },
@@ -79,7 +90,7 @@ async function main(): Promise<void> {
       {
         name: ARCHIVE_TOOL_NAME,
         description:
-          "Archive a normalized conversation into the knowledge-hub vault as raw markdown. When classification is enabled, also enqueues a fire-and-forget classification job consumed by `kh worker`.",
+          "Archive a normalized conversation. Writes raw md to the vault, inserts a conversations row, and enqueues a Stage 2 extract job consumed by `kh worker`.",
         inputSchema: archiveInputJsonSchema,
       },
     ],
@@ -111,23 +122,9 @@ async function main(): Promise<void> {
     }
 
     try {
-      const config = loadConfig();
       const result = await processingQueue.enqueue(() =>
-        archiveConversation(config, parsed.data),
+        archiveConversation({ config, db, sqlite }, parsed.data),
       );
-
-      let jobId: string | undefined;
-      if (config.classification.enabled) {
-        const fsQueue = new FsQueue(join(config.vault.path, "_queue"));
-        jobId = await fsQueue.enqueue({
-          id: newId(),
-          type: "classify",
-          payload: {
-            conversation_id: result.conversation.id,
-            conversation_path: result.relativePath,
-          },
-        });
-      }
 
       return {
         content: [
@@ -137,8 +134,8 @@ async function main(): Promise<void> {
               {
                 conversation_id: result.conversation.id,
                 path: result.relativePath,
+                extract_job_id: result.extractJobId,
                 committed: result.committed,
-                ...(jobId ? { job_id: jobId } : {}),
               },
               null,
               2,

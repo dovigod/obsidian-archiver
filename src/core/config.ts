@@ -2,21 +2,42 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
-import { AutonomyAction } from "@constants/autonomy-action";
-import { AutonomyMode } from "@constants/autonomy-mode";
 import { CaptureMode } from "@constants/capture-mode";
-import { EntityResolutionMethod } from "@constants/entity-resolution-method";
 import { ExecutionMode } from "@constants/execution-mode";
 import { IdStrategy } from "@constants/id-strategy";
 import { LLMProvider } from "@constants/llm-provider";
 import { PageUpdateStrategy } from "@constants/page-update-strategy";
 
-const AutonomyActionSchema = z.nativeEnum(AutonomyAction);
-
 export const ConfigSchema = z.object({
   vault: z.object({
     path: z.string().min(1),
   }),
+  storage: z
+    .object({
+      sqlite: z
+        .object({
+          path: z.string().default(".kh.db"),
+          journal_mode: z
+            .enum(["WAL", "DELETE", "MEMORY"])
+            .default("WAL"),
+          busy_timeout_ms: z.number().int().positive().default(5000),
+          synchronous: z.enum(["OFF", "NORMAL", "FULL"]).default("NORMAL"),
+        })
+        .default({
+          path: ".kh.db",
+          journal_mode: "WAL",
+          busy_timeout_ms: 5000,
+          synchronous: "NORMAL",
+        }),
+    })
+    .default({
+      sqlite: {
+        path: ".kh.db",
+        journal_mode: "WAL",
+        busy_timeout_ms: 5000,
+        synchronous: "NORMAL",
+      },
+    }),
   capture: z
     .object({
       mode: z.nativeEnum(CaptureMode).default(CaptureMode.Auto),
@@ -30,7 +51,7 @@ export const ConfigSchema = z.object({
       mode: CaptureMode.Auto,
       sources: { claude_code: true },
     }),
-  classification: z
+  extract: z
     .object({
       enabled: z.boolean().default(true),
       execution: z.nativeEnum(ExecutionMode).default(ExecutionMode.Async),
@@ -45,12 +66,6 @@ export const ConfigSchema = z.object({
           model: "claude-opus-4-7",
           api_key_env: "ANTHROPIC_API_KEY",
         }),
-      confidence_thresholds: z
-        .object({
-          auto_min: z.number().min(0).max(1).default(0.75),
-          propose_min: z.number().min(0).max(1).default(0.45),
-        })
-        .default({ auto_min: 0.75, propose_min: 0.45 }),
     })
     .default({
       enabled: true,
@@ -60,77 +75,65 @@ export const ConfigSchema = z.object({
         model: "claude-opus-4-7",
         api_key_env: "ANTHROPIC_API_KEY",
       },
-      confidence_thresholds: { auto_min: 0.75, propose_min: 0.45 },
+    }),
+  dedup: z
+    .object({
+      exact: z
+        .array(z.enum(["name", "aliases"]))
+        .default(["name", "aliases"]),
+      fuzzy: z
+        .object({
+          engine: z.literal("fts5").default("fts5"),
+          min_score: z.number().default(0.6),
+          top_k: z.number().int().positive().default(3),
+          llm_confirm: z.boolean().default(true),
+        })
+        .default({
+          engine: "fts5",
+          min_score: 0.6,
+          top_k: 3,
+          llm_confirm: true,
+        }),
+    })
+    .default({
+      exact: ["name", "aliases"],
+      fuzzy: {
+        engine: "fts5",
+        min_score: 0.6,
+        top_k: 3,
+        llm_confirm: true,
+      },
     }),
   page_update_strategy: z
     .nativeEnum(PageUpdateStrategy)
     .default(PageUpdateStrategy.LLMRewrite),
-  autonomy: z
+  sync: z
     .object({
-      mode: z.nativeEnum(AutonomyMode).default(AutonomyMode.Hybrid),
-      auto_actions: z
-        .array(AutonomyActionSchema)
-        .default([
-          AutonomyAction.CreateEntity,
-          AutonomyAction.UpdateEntity,
-          AutonomyAction.AddToIndex,
-        ]),
-      proposal_actions: z
-        .array(AutonomyActionSchema)
-        .default([
-          AutonomyAction.SplitCategory,
-          AutonomyAction.MergeEntities,
-          AutonomyAction.RenameEntity,
-          AutonomyAction.DeletePage,
-        ]),
-    })
-    .default({
-      mode: AutonomyMode.Hybrid,
-      auto_actions: [
-        AutonomyAction.CreateEntity,
-        AutonomyAction.UpdateEntity,
-        AutonomyAction.AddToIndex,
-      ],
-      proposal_actions: [
-        AutonomyAction.SplitCategory,
-        AutonomyAction.MergeEntities,
-        AutonomyAction.RenameEntity,
-        AutonomyAction.DeletePage,
-      ],
-    }),
-  entity_resolution: z
-    .object({
-      method: z
-        .nativeEnum(EntityResolutionMethod)
-        .default(EntityResolutionMethod.LLM),
-      graph_max_entities: z.number().int().positive().default(500),
-    })
-    .default({
-      method: EntityResolutionMethod.LLM,
-      graph_max_entities: 500,
-    }),
-  views: z
-    .object({
-      canvases: z
+      mode: z.enum(["auto", "manual"]).default("auto"),
+      auto: z
         .object({
-          per_category: z.boolean().default(true),
-          per_entity: z.boolean().default(true),
-          global_graph: z.boolean().default(true),
+          strategy: z.enum(["eager", "debounced"]).default("eager"),
+          debounce_ms: z.number().int().nonnegative().default(2000),
         })
-        .default({ per_category: true, per_entity: true, global_graph: true }),
-      bases: z
+        .default({ strategy: "eager", debounce_ms: 2000 }),
+      drift: z
         .object({
-          entity_catalog: z.boolean().default(true),
+          detect: z.boolean().default(true),
+          stage_under: z.string().default("_proposals/manual_edit"),
         })
-        .default({ entity_catalog: true }),
+        .default({ detect: true, stage_under: "_proposals/manual_edit" }),
     })
     .default({
-      canvases: { per_category: true, per_entity: true, global_graph: true },
-      bases: { entity_catalog: true },
+      mode: "auto",
+      auto: { strategy: "eager", debounce_ms: 2000 },
+      drift: { detect: true, stage_under: "_proposals/manual_edit" },
     }),
-  git: z.object({ auto_commit: z.boolean().default(true) }).default({
-    auto_commit: true,
-  }),
+  git: z
+    .object({
+      auto_commit: z.boolean().default(true),
+      commit_per_render: z.boolean().default(true),
+    })
+    .default({ auto_commit: true, commit_per_render: true }),
   ids: z
     .object({
       strategy: z.nativeEnum(IdStrategy).default(IdStrategy.UuidV7),

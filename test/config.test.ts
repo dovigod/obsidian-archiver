@@ -31,7 +31,11 @@ describe("loadConfig", () => {
     const cfg = loadConfig({ projectRoot: dir, skipGlobal: true });
     expect(cfg.vault.path).toBe(join(dir, "vault"));
     expect(cfg.capture.mode).toBe("auto");
-    expect(cfg.classification.llm.provider).toBe("claude");
+    expect(cfg.extract.llm.provider).toBe("claude");
+    expect(cfg.storage.sqlite.path).toBe(".kh.db");
+    expect(cfg.storage.sqlite.journal_mode).toBe("WAL");
+    expect(cfg.dedup.fuzzy.engine).toBe("fts5");
+    expect(cfg.dedup.fuzzy.top_k).toBe(3);
     expect(cfg.git.auto_commit).toBe(true);
   });
 

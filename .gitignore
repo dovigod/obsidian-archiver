@@ -9,6 +9,14 @@ dist/
 # Local config / vault default location (override per-project)
 .knowledge-hub/
 
+# SQLite (Knowledge Hub vault state — rebuildable from raw md via `kh reconcile`)
+*.kh.db
+*.kh.db-wal
+*.kh.db-shm
+
+# Smart Connections plugin state (Obsidian-side embeddings index)
+.smart-env/
+
 # Test artifacts (mkdtemp output preserved for inspection)
 test_result/
 test_result/**/*

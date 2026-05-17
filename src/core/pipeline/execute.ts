@@ -1,292 +1,110 @@
 import type { Config } from "@core/config";
-import { autoCommit } from "@core/git";
+import type { EntitiesRepository } from "@core/db/repository/entities";
 import { newId } from "@core/ids";
 import type { LLMProvider } from "@core/llm/provider";
-import { synthesizeEntityBody } from "@core/pipeline/synthesize";
-import {
-  type ConversationLink,
-  type EntityPage,
-  type EntitySummary,
-  KnowledgeRepository,
-} from "@core/repository/knowledge";
-import { ProposalRepository } from "@core/repository/proposals";
+import { rewriteEntityBody } from "@core/pipeline/rewrite";
 import type {
-  ClassifyOutput,
   Conversation,
+  DedupResult,
   ExtractedEntity,
-  ProposalKind,
-  ProposalRecord,
 } from "@core/schema";
 
 export interface ExecuteArgs {
   config: Config;
   llm: LLMProvider;
+  entitiesRepo: EntitiesRepository;
   conversation: Conversation;
-  conversationLink: ConversationLink;
-  newNode: ExtractedEntity;
-  classify: ClassifyOutput;
-  /**
-   * The pre-existing entity matching `is_duplicate_of` (when set) or the
-   * `new_node.name` slot. Read by the caller so the executor stays free of
-   * filesystem I/O for the lookup itself.
-   */
-  existing: EntityPage | null;
-  /**
-   * Set when both classifier responses failed schema validation. The caller
-   * stages a `raw_invalid` proposal carrying this text so a human can review
-   * what the model actually returned.
-   */
-  fallbackRaw?: string;
-}
-
-export interface ExecuteProposalRef {
-  kind: ProposalKind;
-  relativePath: string;
+  candidate: ExtractedEntity;
+  dedup: DedupResult;
 }
 
 export interface ExecuteResult {
-  /** True iff an entity page was created or rewritten. */
-  applied: boolean;
-  /** Canonical entity name written, or `null` for proposal-only outcomes. */
-  entityName: string | null;
-  /** Vault-relative path of the written entity, or null. */
-  written: string | null;
-  /** When deduped, the existing entity name we merged into. */
+  /** Entity id that was created or updated. */
+  entityId: string;
+  /** Canonical name for the entity row after the operation. */
+  entityName: string;
+  /** True when a new row was inserted; false when an existing row was rewritten. */
+  created: boolean;
+  /** Matched on a fuzzy/dedup hit (non-null when created=false). */
   matched: string | null;
-  proposals: ExecuteProposalRef[];
-}
-
-function dedupStrings(items: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const v of items) {
-    const t = v.trim();
-    if (!t || seen.has(t)) {
-      continue;
-    }
-    seen.add(t);
-    out.push(t);
-  }
-  return out;
-}
-
-function dedupSources(items: readonly ConversationLink[]): ConversationLink[] {
-  const seen = new Set<string>();
-  const out: ConversationLink[] = [];
-  for (const link of items) {
-    if (seen.has(link.id)) {
-      continue;
-    }
-    seen.add(link.id);
-    out.push(link);
-  }
-  return out;
-}
-
-function unionedCategories(page: EntityPage): string[] {
-  const all = [
-    ...(page.primary_parent_name ? [page.primary_parent_name] : []),
-    ...page.additional_index_names,
-  ];
-  return dedupStrings(all);
 }
 
 /**
- * Apply or stage one classifier decision. Side-effects (entity write, git
- * commit, proposal staging) are gated by `mode` and the global autonomy
- * config. Pure ordering — no recursion into other entities.
+ * Apply one dedup decision against the SQLite store.
+ *
+ * - `kind: "new"`     → INSERT entity + aliases + source link; body is the
+ *                       extractor's `draft_body` (no rewrite call needed).
+ * - `kind: "match"`   → LLM-rewrite the existing body integrating the new
+ *                       conversation excerpt; merge new aliases + add source.
+ *
+ * The renderer is NOT called inline here — the run-loop or sync command
+ * picks up the dirty rows.
  */
 export async function executeDecision(
   args: ExecuteArgs,
 ): Promise<ExecuteResult> {
-  const proposals: ExecuteProposalRef[] = [];
-  const proposalRepo = new ProposalRepository(args.config.vault.path);
-  const knowledge = new KnowledgeRepository(args.config.vault.path);
+  const { entitiesRepo, candidate, dedup, conversation } = args;
 
-  // Always stage raw-invalid first so the artifact is preserved even if
-  // downstream apply/proposal staging fails.
-  if (args.fallbackRaw !== undefined) {
-    proposals.push(
-      await stageProposal(proposalRepo, "raw_invalid", {
-        conversationId: args.conversation.id,
-        entityName: args.newNode.name,
-        payload: {
-          raw_text: args.fallbackRaw,
-          new_node: args.newNode,
-        },
-      }),
-    );
-  }
-
-  // Always stage new_category_proposal and rebalancing.actions independently
-  // of mode — per design.md these are *always* proposals.
-  if (args.classify.decision.new_category_proposal) {
-    proposals.push(
-      await stageProposal(proposalRepo, "new_category", {
-        conversationId: args.conversation.id,
-        entityName: args.newNode.name,
-        payload: {
-          proposal: args.classify.decision.new_category_proposal,
-          source_classification: args.classify,
-        },
-      }),
-    );
-  }
-  if (args.classify.rebalancing.actions.length > 0) {
-    proposals.push(
-      await stageProposal(proposalRepo, "rebalancing", {
-        conversationId: args.conversation.id,
-        entityName: args.newNode.name,
-        payload: {
-          rebalancing: args.classify.rebalancing,
-          source_classification: args.classify,
-        },
-      }),
-    );
-  }
-
-  if (args.classify.mode === "proposal") {
-    proposals.push(
-      await stageProposal(proposalRepo, "classification", {
-        conversationId: args.conversation.id,
-        entityName: args.newNode.name,
-        payload: {
-          new_node: args.newNode,
-          classification: args.classify,
-        },
-      }),
-    );
+  if (dedup.kind === "new") {
+    const id = newId();
+    entitiesRepo.create({
+      id,
+      name: candidate.name,
+      summary: candidate.summary,
+      bodyMd: candidate.draft_body,
+      aliases: candidate.aliases,
+    });
+    entitiesRepo.addSource(id, conversation.id);
     return {
-      applied: false,
-      entityName: null,
-      written: null,
+      entityId: id,
+      entityName: candidate.name,
+      created: true,
       matched: null,
-      proposals,
     };
   }
 
-  // mode === "auto" → write/update the entity page.
-  const decision = args.classify.decision;
-  const targetName = decision.is_duplicate_of ?? args.newNode.name;
-  const existing = args.existing;
+  // dedup.kind === "match"
+  const existing = entitiesRepo.findById(dedup.entityId);
+  if (!existing) {
+    // Race / cleanup: candidate disappeared. Fall back to creating a fresh row.
+    const id = newId();
+    entitiesRepo.create({
+      id,
+      name: candidate.name,
+      summary: candidate.summary,
+      bodyMd: candidate.draft_body,
+      aliases: candidate.aliases,
+    });
+    entitiesRepo.addSource(id, conversation.id);
+    return {
+      entityId: id,
+      entityName: candidate.name,
+      created: true,
+      matched: null,
+    };
+  }
 
-  const newBody = await synthesizeEntityBody(args.llm, {
-    entityName: targetName,
-    summary: args.newNode.summary,
-    existing,
-    conversation: args.conversation,
+  const newBody = await rewriteEntityBody(args.llm, {
+    name: existing.name,
+    existingBody: existing.bodyMd,
+    conversation,
   });
 
-  const aliases = dedupStrings([
-    ...(existing?.aliases ?? []),
-    ...args.newNode.aliases,
-    ...decision.aliases,
+  entitiesRepo.updateBody({
+    id: existing.id,
+    bodyMd: newBody,
+    summary: existing.summary || candidate.summary,
+  });
+  entitiesRepo.addAliases(existing.id, [
+    candidate.name,
+    ...candidate.aliases,
   ]);
-
-  const additional_index_ids = dedupStrings([
-    ...(existing?.additional_index_ids ?? []),
-    ...decision.additional_index_ids,
-  ]);
-  const additional_index_names = dedupStrings([
-    ...(existing?.additional_index_names ?? []),
-    ...decision.additional_index_names,
-  ]);
-
-  const primary_parent_id =
-    decision.primary_parent_id || existing?.primary_parent_id || null;
-  const primary_parent_name =
-    decision.primary_parent_name || existing?.primary_parent_name || null;
-
-  const updated: EntityPage = {
-    id: existing?.id ?? newId(),
-    name: targetName,
-    aliases,
-    primary_parent_id,
-    primary_parent_name,
-    additional_index_ids,
-    additional_index_names,
-    categories: dedupStrings([
-      ...(existing?.categories ?? []),
-      ...(primary_parent_name ? [primary_parent_name] : []),
-      ...additional_index_names,
-    ]),
-    sources: dedupSources([...(existing?.sources ?? []), args.conversationLink]),
-    updated_at: new Date().toISOString(),
-    body: newBody,
-  };
-  // Re-derive categories from the canonical fields to stay consistent on rewrite.
-  updated.categories = unionedCategories(updated);
-
-  const { absolutePath, relativePath } = await knowledge.writeEntity(updated);
-  if (args.config.git.auto_commit) {
-    await autoCommit({
-      vaultPath: args.config.vault.path,
-      files: [absolutePath],
-      message: `synthesize(${updated.name}): +${args.conversation.id.slice(0, 8)}`,
-    });
-  }
+  entitiesRepo.addSource(existing.id, conversation.id);
 
   return {
-    applied: true,
-    entityName: updated.name,
-    written: relativePath,
-    matched: decision.is_duplicate_of,
-    proposals,
+    entityId: existing.id,
+    entityName: existing.name,
+    created: false,
+    matched: dedup.matchedTerm ?? existing.name,
   };
-}
-
-interface StageProposalArgs {
-  conversationId: string;
-  entityName: string;
-  payload: Record<string, unknown>;
-}
-
-async function stageProposal(
-  repo: ProposalRepository,
-  kind: ProposalKind,
-  args: StageProposalArgs,
-): Promise<ExecuteProposalRef> {
-  const record: ProposalRecord = {
-    id: newId(),
-    kind,
-    created_at: new Date().toISOString(),
-    conversation_id: args.conversationId,
-    entity_name: args.entityName,
-    payload: args.payload,
-  };
-  const { relativePath } = await repo.write(record);
-  return { kind, relativePath };
-}
-
-/**
- * Look up the entity page the executor will potentially merge into.
- *
- * Resolution order:
- *   1. `decision.is_duplicate_of` — explicit dedup target named by the LLM.
- *   2. `new_node.name` — same-name match against the canonical filename.
- *
- * Pulled into its own helper so `run.ts` can pass it as `existing` without
- * the executor having to read the filesystem itself.
- */
-export async function loadExistingEntity(
-  config: Config,
-  decisionDuplicateOf: string | null,
-  newNodeName: string,
-  graph: readonly EntitySummary[],
-): Promise<EntityPage | null> {
-  const knowledge = new KnowledgeRepository(config.vault.path);
-  if (decisionDuplicateOf) {
-    const direct = await knowledge.readEntity(decisionDuplicateOf);
-    if (direct) {
-      return direct;
-    }
-    // is_duplicate_of may name an entity by id rather than canonical name.
-    const byId = graph.find(
-      (e) => e.id === decisionDuplicateOf || e.name === decisionDuplicateOf,
-    );
-    if (byId) {
-      return knowledge.readEntity(byId.name);
-    }
-  }
-  return knowledge.readEntity(newNodeName);
 }

@@ -1,10 +1,12 @@
 import { mkdirSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { simpleGit } from "simple-git";
+import { createDb, type DB, type SqliteHandle } from "@core/db/client";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const TEST_RESULT_DIR = resolve(here, "..", "test_result");
+const DRIZZLE_DIR = resolve(here, "..", "drizzle");
 
 /**
  * Returns the project-local `<repo>/test_result/` directory used as the parent
@@ -21,14 +23,6 @@ export function testTmpDir(): string {
 
 /**
  * Pre-initializes a vault directory as a git repo with test-safe local config.
- *
- * Production callers let `autoCommit` lazily `git init` the vault on first
- * commit, but that inherits the user's global git config — which on some
- * machines requires GPG signing or has no `user.email`/`user.name` set, both
- * of which break unattended test commits. Repo-local config wins over global,
- * so seeding the repo here keeps the test-only escape hatch off the
- * production hot path. `autoCommit` sees `.git/` already present and skips
- * its own init step.
  */
 export async function prepareVaultRepo(vaultPath: string): Promise<void> {
   mkdirSync(vaultPath, { recursive: true });
@@ -38,4 +32,22 @@ export async function prepareVaultRepo(vaultPath: string): Promise<void> {
   await git.addConfig("tag.gpgsign", "false", false, "local");
   await git.addConfig("user.email", "test@knowledge-hub.local", false, "local");
   await git.addConfig("user.name", "knowledge-hub-test", false, "local");
+}
+
+/**
+ * Open a fresh test database with migrations applied. By default uses a file
+ * inside the vault so it survives across helper calls within one test;
+ * pass `inMemory: true` for a one-off `:memory:` DB.
+ */
+export function openTestDb(
+  vaultPath: string,
+  options: { inMemory?: boolean } = {},
+): { db: DB; sqlite: SqliteHandle } {
+  const path = options.inMemory ? ":memory:" : join(vaultPath, ".kh.db");
+  return createDb({
+    path,
+    journalMode: options.inMemory ? "MEMORY" : "WAL",
+    migrate: true,
+    migrationsFolder: DRIZZLE_DIR,
+  });
 }

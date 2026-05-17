@@ -1,21 +1,14 @@
 import type { Config } from "@core/config";
+import { EntitiesRepository } from "@core/db/repository/entities";
+import { RenderedFilesRepository } from "@core/db/repository/rendered_files";
+import type { DB } from "@core/db/client";
 import type { LLMProvider } from "@core/llm/provider";
-import { classifyEntity } from "@core/pipeline/classify";
-import {
-  type ExecuteProposalRef,
-  type ExecuteResult,
-  executeDecision,
-  loadExistingEntity,
-} from "@core/pipeline/execute";
+import { autoCommit } from "@core/git";
+import { dedupEntity } from "@core/pipeline/dedup";
+import { executeDecision, type ExecuteResult } from "@core/pipeline/execute";
 import { extractEntities } from "@core/pipeline/extract";
-import { buildClassifyInput } from "@core/pipeline/resolve";
-import {
-  type ConversationLink,
-  type EntitySummary,
-  KnowledgeRepository,
-} from "@core/repository/knowledge";
+import { renderDirty } from "@core/pipeline/render";
 import { MarkdownVaultRepository } from "@core/repository/raw";
-import type { Conversation } from "@core/schema";
 
 export interface RunPipelineInput {
   conversationId: string;
@@ -23,46 +16,24 @@ export interface RunPipelineInput {
   conversationPath: string;
 }
 
-export interface RunPipelineEntityResult {
-  name: string;
-  applied: boolean;
-  matched: string | null;
-  written: string | null;
-  proposals: ExecuteProposalRef[];
-}
-
 export interface RunPipelineResult {
   conversationId: string;
-  entities: RunPipelineEntityResult[];
-}
-
-function conversationLabel(conv: Conversation): string {
-  const date = conv.created_at.slice(0, 10);
-  const firstUser = conv.messages.find((m) => m.role === "user");
-  if (!firstUser) {
-    return date;
-  }
-  const snippet = firstUser.content.replace(/\s+/g, " ").trim().slice(0, 60);
-  return snippet ? `${date} — ${snippet}` : date;
+  entities: ExecuteResult[];
+  rendered: { written: string[]; deleted: string[]; driftStaged: string[] };
 }
 
 /**
- * Stage 2 entry point: extract → resolve → classify → execute for one
- * conversation.
+ * Stage 2 orchestration for one conversation:
  *
- *   1. extract: pull entity candidates from the raw conversation.
- *   2. resolve: build a ClassifyInput per candidate from the existing graph.
- *   3. classify: ask the LLM for a structured ClassifyOutput (with retry +
- *      proposal fallback on schema-validation failure).
- *   4. execute: apply auto-decisions or stage proposals under
- *      `vault/_proposals/`.
- *
- * New entities (auto-applied) are appended to the in-memory graph so later
- * candidates from the same conversation can resolve to them without a fresh
- * disk read.
+ *   1. read raw conversation md
+ *   2. extract entity candidates (LLM)
+ *   3. for each candidate: dedup → execute (insert new OR rewrite existing)
+ *   4. render any dirty entity md (eager mode)
+ *   5. git auto-commit per render (config-gated)
  */
 export async function runStage2Pipeline(
   config: Config,
+  db: DB,
   llm: LLMProvider,
   input: RunPipelineInput,
 ): Promise<RunPipelineResult> {
@@ -71,112 +42,55 @@ export async function runStage2Pipeline(
 
   const candidates = await extractEntities(llm, conversation);
   if (candidates.length === 0) {
-    return { conversationId: input.conversationId, entities: [] };
+    return {
+      conversationId: input.conversationId,
+      entities: [],
+      rendered: { written: [], deleted: [], driftStaged: [] },
+    };
   }
 
-  const knowledge = new KnowledgeRepository(config.vault.path);
-  const graph: EntitySummary[] = await knowledge.listEntities();
+  const entitiesRepo = new EntitiesRepository(db);
+  const renderedRepo = new RenderedFilesRepository(db);
+  const results: ExecuteResult[] = [];
 
-  const link: ConversationLink = {
-    id: conversation.id,
-    path: input.conversationPath.replace(/\.md$/, ""),
-    label: conversationLabel(conversation),
-  };
-
-  const entities: RunPipelineEntityResult[] = [];
   for (const candidate of candidates) {
-    const classifyInput = buildClassifyInput({
-      config,
-      newNode: candidate,
-      graph,
+    const dedup = await dedupEntity(llm, entitiesRepo, candidate, {
+      topK: config.dedup.fuzzy.top_k,
+      minScore: config.dedup.fuzzy.min_score,
+      llmConfirm: config.dedup.fuzzy.llm_confirm,
     });
-    const { output, fallbackRaw } = await classifyEntity(llm, classifyInput);
-
-    const existing = await loadExistingEntity(
-      config,
-      output.decision.is_duplicate_of,
-      candidate.name,
-      graph,
-    );
-
-    const result: ExecuteResult = await executeDecision({
+    const result = await executeDecision({
       config,
       llm,
+      entitiesRepo,
       conversation,
-      conversationLink: link,
-      newNode: candidate,
-      classify: output,
-      existing,
-      ...(fallbackRaw !== undefined ? { fallbackRaw } : {}),
+      candidate,
+      dedup,
+    });
+    results.push(result);
+  }
+
+  let rendered = { written: [] as string[], deleted: [] as string[], driftStaged: [] as string[] };
+  if (config.sync.mode === "auto" && config.sync.auto.strategy === "eager") {
+    rendered = await renderDirty(config.vault.path, entitiesRepo, renderedRepo, {
+      detectDrift: config.sync.drift.detect,
     });
 
-    if (result.applied && result.entityName) {
-      // Refresh the in-memory graph so later candidates in this same run can
-      // dedup against the entity we just wrote.
-      const summaryIdx = graph.findIndex(
-        (g) => g.name === result.entityName,
+    if (config.git.auto_commit && rendered.written.length + rendered.deleted.length > 0) {
+      const files = [...rendered.written, ...rendered.deleted].map(
+        (rel) => `${config.vault.path}/${rel}`,
       );
-      const summary: EntitySummary = {
-        id: existing?.id ?? "",
-        name: result.entityName,
-        categories: dedupStrings([
-          ...(existing?.categories ?? []),
-          ...output.decision.additional_index_names,
-          ...(output.decision.primary_parent_name
-            ? [output.decision.primary_parent_name]
-            : []),
-        ]),
-        aliases: dedupStrings([
-          ...(existing?.aliases ?? []),
-          ...candidate.aliases,
-          ...output.decision.aliases,
-        ]),
-        primary_parent_id:
-          output.decision.primary_parent_id ||
-          existing?.primary_parent_id ||
-          null,
-        primary_parent_name:
-          output.decision.primary_parent_name ||
-          existing?.primary_parent_name ||
-          null,
-        additional_index_ids: dedupStrings([
-          ...(existing?.additional_index_ids ?? []),
-          ...output.decision.additional_index_ids,
-        ]),
-        additional_index_names: dedupStrings([
-          ...(existing?.additional_index_names ?? []),
-          ...output.decision.additional_index_names,
-        ]),
-      };
-      if (summaryIdx >= 0) {
-        graph[summaryIdx] = summary;
-      } else {
-        graph.push(summary);
-      }
+      await autoCommit({
+        vaultPath: config.vault.path,
+        files,
+        message: `sync: +${rendered.written.length} -${rendered.deleted.length}`,
+      });
     }
-
-    entities.push({
-      name: result.entityName ?? candidate.name,
-      applied: result.applied,
-      matched: result.matched,
-      written: result.written,
-      proposals: result.proposals,
-    });
   }
 
-  return { conversationId: input.conversationId, entities };
-}
-
-function dedupStrings(items: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const out: string[] = [];
-  for (const v of items) {
-    const t = v.trim();
-    if (!t || seen.has(t)) {
-      continue;
-    }
-    seen.add(t);
-    out.push(t);
-  }
-  return out;
+  return {
+    conversationId: input.conversationId,
+    entities: results,
+    rendered,
+  };
 }
