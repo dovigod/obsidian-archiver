@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   type ProposalKind,
@@ -61,5 +61,29 @@ export class ProposalRepository {
       }
     }
     return out;
+  }
+
+  /**
+   * Look up a proposal by id across both surviving kinds. Returns null when
+   * no file is found.
+   */
+  async findById(id: string): Promise<ProposalRecord | null> {
+    for (const kind of ["manual_edit", "raw_invalid"] as const) {
+      const { abs } = this.pathFor(kind, id);
+      if (!existsSync(abs)) {
+        continue;
+      }
+      const text = await readFile(abs, "utf8");
+      const parsed = ProposalRecordSchema.safeParse(JSON.parse(text));
+      if (parsed.success) {
+        return parsed.data;
+      }
+    }
+    return null;
+  }
+
+  async remove(kind: ProposalKind, id: string): Promise<void> {
+    const { abs } = this.pathFor(kind, id);
+    await rm(abs, { force: true });
   }
 }

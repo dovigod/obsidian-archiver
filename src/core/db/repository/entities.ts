@@ -102,7 +102,18 @@ export class EntitiesRepository {
   }
 
   softDelete(id: string, at?: number): void {
-    const ts = at ?? Date.now();
+    const requested = at ?? Date.now();
+    const existing = this.db
+      .select({ syncedAt: entities.syncedAt })
+      .from(entities)
+      .where(eq(entities.id, id))
+      .get();
+    const ts =
+      existing?.syncedAt !== null &&
+      existing?.syncedAt !== undefined &&
+      requested <= existing.syncedAt
+        ? existing.syncedAt + 1
+        : requested;
     this.db
       .update(entities)
       .set({ deletedAt: ts, updatedAt: ts })
