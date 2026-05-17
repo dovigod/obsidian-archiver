@@ -1,12 +1,7 @@
-import { readFile } from "node:fs/promises";
 import { z } from "zod";
 import { Role } from "@constants/role";
-import { Source } from "@constants/source";
-import {
-  type ArchiveInput,
-  type Message,
-  RoleSchema,
-} from "@core/schema";
+import { type Message, RoleSchema } from "@core/schema";
+import { flattenContent, type ParsedTranscript } from "@core/transcript/types";
 
 /**
  * Loose schema for a single Claude Code JSONL line. The on-disk format has
@@ -41,43 +36,6 @@ const RawLineSchema = z
 
 type RawLine = z.infer<typeof RawLineSchema>;
 
-function flattenContent(content: unknown): string {
-  if (content == null) {
-    return "";
-  }
-  if (typeof content === "string") {
-    return content;
-  }
-  if (Array.isArray(content)) {
-    return content
-      .map((part) => flattenContent(part))
-      .filter(Boolean)
-      .join("\n\n");
-  }
-  if (typeof content === "object") {
-    const obj = content as Record<string, unknown>;
-    if (typeof obj.text === "string") {
-      return obj.text;
-    }
-    if (typeof obj.content === "string") {
-      return obj.content;
-    }
-    if (Array.isArray(obj.content)) {
-      return flattenContent(obj.content);
-    }
-    if (obj.type === "tool_use") {
-      const name = typeof obj.name === "string" ? obj.name : "tool";
-      const input = obj.input ?? {};
-      return `[tool_use:${name}] ${JSON.stringify(input)}`;
-    }
-    if (obj.type === "tool_result") {
-      return `[tool_result] ${flattenContent(obj.content)}`;
-    }
-    return "";
-  }
-  return String(content);
-}
-
 function inferRole(line: RawLine): Role | null {
   const candidate =
     line.message?.role ??
@@ -111,16 +69,7 @@ function lineToMessage(line: RawLine): Message | null {
   };
 }
 
-export interface ParsedTranscript {
-  messages: Message[];
-  cwd?: string;
-  model?: string;
-  git?: { repo?: string; branch?: string; commit?: string };
-  /** Earliest timestamp seen — used as conversation created_at when present. */
-  startedAt?: string;
-}
-
-export function parseTranscriptText(text: string): ParsedTranscript {
+export function parseClaudeCodeText(text: string): ParsedTranscript {
   const messages: Message[] = [];
   let cwd: string | undefined;
   let model: string | undefined;
@@ -164,31 +113,4 @@ export function parseTranscriptText(text: string): ParsedTranscript {
   }
 
   return { messages, cwd, model, git, startedAt };
-}
-
-export async function parseTranscriptFile(
-  path: string,
-): Promise<ParsedTranscript> {
-  const text = await readFile(path, "utf8");
-  return parseTranscriptText(text);
-}
-
-export function transcriptToArchiveInput(
-  parsed: ParsedTranscript,
-  extras: Partial<
-    Pick<ArchiveInput, "project" | "tags" | "topics" | "conversation_type">
-  > = {},
-): ArchiveInput {
-  return {
-    source: Source.ClaudeCode,
-    model: parsed.model,
-    created_at: parsed.startedAt,
-    cwd: parsed.cwd,
-    git: parsed.git,
-    messages: parsed.messages,
-    project: extras.project,
-    tags: extras.tags,
-    topics: extras.topics,
-    conversation_type: extras.conversation_type,
-  };
 }

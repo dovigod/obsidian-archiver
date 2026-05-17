@@ -53,23 +53,31 @@ export const entityAliases = sqliteTable(
  *
  * Array fields are stored as JSON strings — SQLite has no native array.
  */
-export const conversations = sqliteTable("conversations", {
-  id: text("id").primaryKey(),
-  source: text("source").notNull(),
-  model: text("model"),
-  createdAt: integer("created_at").notNull(),
-  projectJson: text("project_json").notNull().default("[]"),
-  topicsJson: text("topics_json").notNull().default("[]"),
-  conversationTypeJson: text("conversation_type_json")
-    .notNull()
-    .default("[]"),
-  tagsJson: text("tags_json").notNull().default("[]"),
-  gitRepo: text("git_repo"),
-  gitBranch: text("git_branch"),
-  gitCommit: text("git_commit"),
-  cwd: text("cwd"),
-  rawPath: text("raw_path").notNull(),
-});
+export const conversations = sqliteTable(
+  "conversations",
+  {
+    id: text("id").primaryKey(),
+    source: text("source").notNull(),
+    model: text("model"),
+    createdAt: integer("created_at").notNull(),
+    projectJson: text("project_json").notNull().default("[]"),
+    topicsJson: text("topics_json").notNull().default("[]"),
+    conversationTypeJson: text("conversation_type_json")
+      .notNull()
+      .default("[]"),
+    tagsJson: text("tags_json").notNull().default("[]"),
+    gitRepo: text("git_repo"),
+    gitBranch: text("git_branch"),
+    gitCommit: text("git_commit"),
+    cwd: text("cwd"),
+    rawPath: text("raw_path").notNull(),
+    /** sha256 over normalized messages for backfill idempotency (Stage 5). */
+    contentHash: text("content_hash"),
+  },
+  (t) => ({
+    contentHashIdx: index("idx_conversations_content_hash").on(t.contentHash),
+  }),
+);
 
 /** entity ⇄ conversation provenance link. */
 export const sources = sqliteTable(
@@ -134,9 +142,32 @@ export const renderedFiles = sqliteTable(
   }),
 );
 
+/**
+ * Optional embeddings used by the Stage 5 advanced-dedup path. One row per
+ * entity, populated by the `embed` worker job; gated by config — when
+ * `dedup.fuzzy.embeddings.enabled` is false, this table stays empty.
+ */
+export const dedupEmbeddings = sqliteTable(
+  "dedup_embeddings",
+  {
+    entityId: text("entity_id")
+      .primaryKey()
+      .references(() => entities.id, { onDelete: "cascade" }),
+    vector: blob("vector").notNull(),
+    dims: integer("dims").notNull(),
+    model: text("model").notNull(),
+    updatedAt: integer("updated_at").notNull(),
+  },
+  (t) => ({
+    modelIdx: index("idx_dedup_embeddings_model").on(t.model),
+  }),
+);
+
 /* Drizzle row types — suffixed `Row` to avoid colliding with the parsed/in-memory
  * shapes in `src/core/schema.ts` (e.g. `Conversation`, `Source` enum). */
 export type EntityRow = typeof entities.$inferSelect;
+export type DedupEmbeddingRow = typeof dedupEmbeddings.$inferSelect;
+export type NewDedupEmbeddingRow = typeof dedupEmbeddings.$inferInsert;
 export type NewEntityRow = typeof entities.$inferInsert;
 export type EntityAliasRow = typeof entityAliases.$inferSelect;
 export type ConversationRow = typeof conversations.$inferSelect;

@@ -2,16 +2,13 @@
 import {
   createReadStream,
   createWriteStream,
-  existsSync,
   mkdirSync,
   renameSync,
   rmSync,
-  writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip, createGzip } from "node:zlib";
-import { simpleGit } from "simple-git";
 import { archiveConversation } from "@core/archive";
 import { loadConfig } from "@core/config";
 import { createDb } from "@core/db/client";
@@ -19,14 +16,43 @@ import { ConversationsRepository } from "@core/db/repository/conversations";
 import { EntitiesRepository } from "@core/db/repository/entities";
 import { JobsRepository } from "@core/db/repository/jobs";
 import { RenderedFilesRepository } from "@core/db/repository/rendered_files";
+import { initVault } from "@core/init";
+import { exportVault } from "@core/io/export";
+import { importVault } from "@core/io/import";
+import { backfill } from "@core/pipeline/backfill";
 import { reconcile } from "@core/pipeline/reconcile";
 import { renderDirty } from "@core/pipeline/render";
 import { ProposalRepository } from "@core/repository/proposals";
 import {
+  SMART_CONNECTIONS_DOC_FILENAME,
+  detectSmartConnections,
+} from "@core/smart-connections";
+import {
+  type TranscriptSource,
+  parsedToArchiveInput,
+  parseTranscriptFromPath,
   parseTranscriptFile,
   transcriptToArchiveInput,
 } from "@core/transcript";
 import { runWorker } from "@core/worker";
+
+const TRANSCRIPT_SOURCES: readonly TranscriptSource[] = [
+  "claude-code",
+  "chatgpt",
+  "gemini",
+];
+
+function parseTranscriptSource(
+  value: string | undefined,
+): TranscriptSource | undefined {
+  if (!value) {return undefined;}
+  if ((TRANSCRIPT_SOURCES as readonly string[]).includes(value)) {
+    return value as TranscriptSource;
+  }
+  throw new Error(
+    `unknown --source "${value}"; expected one of: ${TRANSCRIPT_SOURCES.join(", ")}`,
+  );
+}
 
 interface ParsedArgs {
   command: string | undefined;
@@ -100,14 +126,19 @@ function printUsage(): void {
       "",
       "Usage:",
       "  kh init <vault-path>",
-      "  kh archive-transcript <transcript.jsonl> [--project NAME]... [--tag TAG]...",
-      "                                          [--topic TOPIC]... [--vault PATH]",
+      "  kh archive-transcript <path> [--source claude-code|chatgpt|gemini]",
+      "                               [--project NAME]... [--tag TAG]...",
+      "                               [--topic TOPIC]... [--vault PATH]",
+      "  kh backfill <dir> [--source claude-code|chatgpt|gemini] [--dry-run]",
+      "                    [--vault PATH]",
       "  kh worker [--once] [--poll-ms MS]",
       "  kh sync [--entity NAME] [--since YYYY-MM-DD] [--full] [--dry-run]",
       "  kh reconcile",
       "  kh apply-proposal <id>",
       "  kh backup",
       "  kh restore <path>",
+      "  kh export [--output PATH]",
+      "  kh import <archive.tar.gz> --vault <path> [--force]",
       "  kh status",
       "  kh --help",
       "",
@@ -134,43 +165,25 @@ async function runInit(args: ParsedArgs): Promise<number> {
     printUsage();
     return 2;
   }
-  const absVault = resolve(vault);
-  for (const sub of [
-    ".",
-    "raw/conversations",
-    "knowledge",
-    "_proposals",
-    "_backups",
-  ]) {
-    mkdirSync(join(absVault, sub), { recursive: true });
-  }
 
-  const gitignorePath = join(absVault, ".gitignore");
-  if (!existsSync(gitignorePath)) {
-    writeFileSync(
-      gitignorePath,
-      ["*.kh.db", "*.kh.db-wal", "*.kh.db-shm", ".smart-env/", ""].join("\n"),
+  const result = await initVault(vault);
+  if (result.gitWarning) {
+    process.stderr.write(
+      `warning: git init failed (${result.gitWarning}); vault scaffolded but not committed.\n`,
     );
   }
 
-  const dbPath = join(absVault, ".kh.db");
-  const { sqlite } = createDb({ path: dbPath, migrate: true });
-  sqlite.close();
-
-  if (!existsSync(join(absVault, ".git"))) {
-    try {
-      const git = simpleGit({ baseDir: absVault });
-      await git.init();
-      await git.add(".gitignore");
-      await git.commit("init: knowledge-hub vault");
-    } catch (err) {
-      process.stderr.write(
-        `warning: git init failed (${(err as Error).message}); vault scaffolded but not committed.\n`,
-      );
-    }
-  }
-
-  process.stdout.write(`initialized vault at ${absVault}\n`);
+  process.stdout.write(`initialized vault at ${result.vaultPath}\n`);
+  process.stdout.write(
+    [
+      "",
+      "Next: enable Smart Connections in Obsidian for related-notes UX.",
+      `  1. Open this vault in Obsidian (${result.vaultPath})`,
+      "  2. Settings → Community plugins → Browse → Smart Connections → Install + Enable",
+      `  3. Point it at the "knowledge/" folder (see ${SMART_CONNECTIONS_DOC_FILENAME})`,
+      "",
+    ].join("\n"),
+  );
   return 0;
 }
 
@@ -200,25 +213,106 @@ async function runArchiveTranscript(args: ParsedArgs): Promise<number> {
   });
 
   try {
-    const parsed = await parseTranscriptFile(transcriptPath);
-    if (parsed.messages.length === 0) {
-      process.stderr.write(
-        `warning: no recognizable messages in ${transcriptPath}; skipping archive.\n`,
+    const sourceOpt = parseTranscriptSource(asString(args.options.source));
+    const extras = {
+      project: asArray(args.options.project),
+      tags: asArray(args.options.tag),
+      topics: asArray(args.options.topic),
+    };
+
+    if (sourceOpt === undefined || sourceOpt === "claude-code") {
+      // Single-conversation back-compat path (Claude Code).
+      const parsed = await parseTranscriptFile(transcriptPath);
+      if (parsed.messages.length === 0) {
+        process.stderr.write(
+          `warning: no recognizable messages in ${transcriptPath}; skipping archive.\n`,
+        );
+        return 0;
+      }
+      const input = transcriptToArchiveInput(parsed, extras);
+      const result = await archiveConversation(
+        { config, db, sqlite },
+        input,
+        { skipDuplicates: true },
+      );
+      process.stdout.write(
+        `${result.skippedDuplicate ? "skipped (duplicate) " : ""}${result.relativePath}${result.committed ? " (committed)" : ""}\n`,
       );
       return 0;
     }
 
-    const input = transcriptToArchiveInput(parsed, {
-      project: asArray(args.options.project),
-      tags: asArray(args.options.tag),
-      topics: asArray(args.options.topic),
+    // Multi-source path — one transcript file can contain N conversations.
+    const transcripts = await parseTranscriptFromPath(transcriptPath, {
+      source: sourceOpt,
     });
-
-    const result = await archiveConversation({ config, db, sqlite }, input);
-    process.stdout.write(
-      `${result.relativePath}${result.committed ? " (committed)" : ""}\n`,
-    );
+    if (transcripts.length === 0) {
+      process.stderr.write(
+        `warning: no recognizable conversations in ${transcriptPath}; skipping.\n`,
+      );
+      return 0;
+    }
+    let imported = 0;
+    let skipped = 0;
+    for (const transcript of transcripts) {
+      const input = parsedToArchiveInput(transcript, {
+        source: sourceOpt,
+        extras,
+      });
+      const result = await archiveConversation(
+        { config, db, sqlite },
+        input,
+        { skipDuplicates: true },
+      );
+      if (result.skippedDuplicate) {
+        skipped += 1;
+      } else {
+        imported += 1;
+        process.stdout.write(`${result.relativePath}\n`);
+      }
+    }
+    process.stdout.write(`imported ${imported}, skipped ${skipped}\n`);
     return 0;
+  } finally {
+    sqlite.close();
+  }
+}
+
+async function runBackfill(args: ParsedArgs): Promise<number> {
+  const [dir] = args.positional;
+  if (!dir) {
+    process.stderr.write("error: missing <dir>\n");
+    printUsage();
+    return 2;
+  }
+  const dryRun = args.options["dry-run"] === true;
+  const sourceOpt = parseTranscriptSource(asString(args.options.source));
+  const overrides = (() => {
+    const vault = asString(args.options.vault);
+    if (!vault) {return undefined;}
+    return { vault: { path: vault } };
+  })();
+  const config = loadConfig({ overrides });
+  const { db, sqlite } = createDb({
+    path: join(config.vault.path, config.storage.sqlite.path),
+    journalMode: config.storage.sqlite.journal_mode,
+    busyTimeoutMs: config.storage.sqlite.busy_timeout_ms,
+    synchronous: config.storage.sqlite.synchronous,
+    migrate: true,
+  });
+  try {
+    const result = await backfill({ config, db, sqlite }, dir, {
+      ...(sourceOpt ? { source: sourceOpt } : {}),
+      dryRun,
+    });
+    process.stdout.write(
+      `scanned ${result.scanned}, imported ${result.imported}, skipped ${result.skipped}` +
+        (result.errors.length ? `, errors ${result.errors.length}` : "") +
+        "\n",
+    );
+    for (const err of result.errors) {
+      process.stderr.write(`  ! ${err.path}: ${err.error}\n`);
+    }
+    return result.errors.length > 0 ? 1 : 0;
   } finally {
     sqlite.close();
   }
@@ -428,11 +522,56 @@ async function runRestore(args: ParsedArgs): Promise<number> {
   return 0;
 }
 
+async function runExport(args: ParsedArgs): Promise<number> {
+  const outputOpt = asString(args.options.output);
+  const { config, sqlite } = openDbFromConfig();
+  try {
+    const result = await exportVault(config.vault.path, sqlite, {
+      ...(outputOpt ? { outputPath: outputOpt } : {}),
+    });
+    process.stdout.write(`${result.outputPath}\n`);
+    return 0;
+  } finally {
+    sqlite.close();
+  }
+}
+
+async function runImport(args: ParsedArgs): Promise<number> {
+  const [archivePath] = args.positional;
+  if (!archivePath) {
+    process.stderr.write("error: missing <archive-path>\n");
+    printUsage();
+    return 2;
+  }
+  const vault = asString(args.options.vault);
+  if (!vault) {
+    process.stderr.write("error: missing --vault <path>\n");
+    printUsage();
+    return 2;
+  }
+  const force = args.options.force === true;
+  try {
+    const result = await importVault(archivePath, vault, { force });
+    process.stdout.write(
+      `imported into ${result.vaultPath} (${result.extracted} entries${
+        result.dbRestored ? ", db restored" : ""
+      })\n`,
+    );
+    return 0;
+  } catch (err) {
+    process.stderr.write(`error: ${(err as Error).message}\n`);
+    return 1;
+  }
+}
+
 function runStatus(): number {
-  const { db, sqlite } = openDbFromConfig();
+  const { config, db, sqlite } = openDbFromConfig();
   try {
     const entitiesRepo = new EntitiesRepository(db);
     const jobsRepo = new JobsRepository(db, sqlite);
+    const smartConnections = detectSmartConnections(config.vault.path)
+      ? "active"
+      : "not detected";
     process.stdout.write(
       [
         `entities (alive):  ${entitiesRepo.countAll()}`,
@@ -440,6 +579,7 @@ function runStatus(): number {
         `jobs pending:      ${jobsRepo.countByState("pending")}`,
         `jobs running:      ${jobsRepo.countByState("running")}`,
         `jobs failed:       ${jobsRepo.countByState("failed")}`,
+        `smart-connections: ${smartConnections}`,
         "",
       ].join("\n"),
     );
@@ -460,6 +600,8 @@ async function main(): Promise<number> {
       return runInit(args);
     case "archive-transcript":
       return runArchiveTranscript(args);
+    case "backfill":
+      return runBackfill(args);
     case "worker":
       return runWorkerCommand(args);
     case "sync":
@@ -472,6 +614,10 @@ async function main(): Promise<number> {
       return runBackup();
     case "restore":
       return runRestore(args);
+    case "export":
+      return runExport(args);
+    case "import":
+      return runImport(args);
     case "status":
       return runStatus();
     default:

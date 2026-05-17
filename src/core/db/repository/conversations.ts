@@ -15,6 +15,8 @@ export interface CreateConversationInput {
   git?: { repo?: string; branch?: string; commit?: string };
   cwd?: string;
   rawPath: string;
+  /** sha256 of normalized messages — backfill idempotency. */
+  contentHash?: string;
 }
 
 export class ConversationsRepository {
@@ -37,6 +39,7 @@ export class ConversationsRepository {
         gitCommit: input.git?.commit ?? null,
         cwd: input.cwd ?? null,
         rawPath: input.rawPath,
+        contentHash: input.contentHash ?? null,
       })
       .returning()
       .get();
@@ -47,6 +50,14 @@ export class ConversationsRepository {
       .select()
       .from(conversations)
       .where(eq(conversations.id, id))
+      .get();
+  }
+
+  findByContentHash(hash: string): ConversationRow | undefined {
+    return this.db
+      .select()
+      .from(conversations)
+      .where(eq(conversations.contentHash, hash))
       .get();
   }
 

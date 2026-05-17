@@ -1,4 +1,6 @@
+import type { DedupEmbeddingsRepository } from "@core/db/repository/dedup_embeddings";
 import type { EntitiesRepository } from "@core/db/repository/entities";
+import type { EmbeddingsProvider } from "@core/embeddings/provider";
 import type { LLMProvider } from "@core/llm/provider";
 import { loadPrompt, render } from "@core/llm/prompts";
 import { extractJson } from "@core/pipeline/json";
@@ -8,6 +10,13 @@ import {
   type DedupResult,
   type ExtractedEntity,
 } from "@core/schema";
+
+export interface EmbeddingsDedupOptions {
+  provider: EmbeddingsProvider;
+  repo: DedupEmbeddingsRepository;
+  topK: number;
+  minCosine: number;
+}
 
 export interface DedupOptions {
   /** Max FTS5 candidates to consider. */
@@ -24,6 +33,12 @@ export interface DedupOptions {
    * fuzzy hits are accepted as matches (cheaper, lower precision).
    */
   llmConfirm: boolean;
+  /**
+   * When set, after the FTS5 fuzzy step the candidate is embedded and the
+   * nearest existing entities are added to the candidate list passed to the
+   * LLM confirm prompt. Stage 5 advanced-dedup; default undefined (off).
+   */
+  embeddings?: EmbeddingsDedupOptions;
 }
 
 /**
@@ -65,9 +80,6 @@ export async function dedupEntity(
   // 3. FTS5 fuzzy match
   const probe = [candidate.name, ...candidate.aliases].join(" ");
   const hits = repo.searchFuzzy(probe, options.topK);
-  if (hits.length === 0) {
-    return { kind: "new" };
-  }
 
   // Dedup against the underlying entity rows so a single entity hit via
   // multiple aliases doesn't get double-counted.
@@ -94,6 +106,44 @@ export async function dedupEntity(
       aliases: repo.listAliases(ent.id),
     });
   }
+
+  // 3a. Stage 5: augment with nearest neighbors from the embeddings index.
+  if (options.embeddings) {
+    const text = [candidate.name, candidate.summary, ...candidate.aliases]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+    if (text.length > 0) {
+      try {
+        const vec = await options.embeddings.provider.embed(text);
+        const nearest = options.embeddings.repo.nearest(
+          vec,
+          options.embeddings.topK,
+          options.embeddings.minCosine,
+          options.embeddings.provider.model,
+        );
+        for (const nn of nearest) {
+          if (seen.has(nn.entityId)) {continue;}
+          const ent = repo.findById(nn.entityId);
+          if (!ent || ent.deletedAt !== null) {continue;}
+          seen.add(nn.entityId);
+          candidates.push({
+            id: ent.id,
+            name: ent.name,
+            summary: ent.summary,
+            aliases: repo.listAliases(ent.id),
+          });
+        }
+      } catch (err) {
+        // Embedding is best-effort augmentation — never block the main path
+        // on a network or model failure.
+        process.stderr.write(
+          `[dedup] embeddings augmentation failed: ${(err as Error).message}\n`,
+        );
+      }
+    }
+  }
+
   if (candidates.length === 0) {
     return { kind: "new" };
   }

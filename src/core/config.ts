@@ -87,12 +87,37 @@ export const ConfigSchema = z.object({
           min_score: z.number().default(0.6),
           top_k: z.number().int().positive().default(3),
           llm_confirm: z.boolean().default(true),
+          embeddings: z
+            .object({
+              enabled: z.boolean().default(false),
+              provider: z.enum(["mock", "openai"]).default("openai"),
+              model: z.string().default("text-embedding-3-small"),
+              api_key_env: z.string().default("OPENAI_API_KEY"),
+              top_k: z.number().int().positive().default(5),
+              min_cosine: z.number().default(0.78),
+            })
+            .default({
+              enabled: false,
+              provider: "openai",
+              model: "text-embedding-3-small",
+              api_key_env: "OPENAI_API_KEY",
+              top_k: 5,
+              min_cosine: 0.78,
+            }),
         })
         .default({
           engine: "fts5",
           min_score: 0.6,
           top_k: 3,
           llm_confirm: true,
+          embeddings: {
+            enabled: false,
+            provider: "openai",
+            model: "text-embedding-3-small",
+            api_key_env: "OPENAI_API_KEY",
+            top_k: 5,
+            min_cosine: 0.78,
+          },
         }),
     })
     .default({
@@ -102,6 +127,14 @@ export const ConfigSchema = z.object({
         min_score: 0.6,
         top_k: 3,
         llm_confirm: true,
+        embeddings: {
+          enabled: false,
+          provider: "openai",
+          model: "text-embedding-3-small",
+          api_key_env: "OPENAI_API_KEY",
+          top_k: 5,
+          min_cosine: 0.78,
+        },
       },
     }),
   page_update_strategy: z

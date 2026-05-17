@@ -1,10 +1,13 @@
 import type { Config } from "@core/config";
+import { DedupEmbeddingsRepository } from "@core/db/repository/dedup_embeddings";
 import { EntitiesRepository } from "@core/db/repository/entities";
 import { RenderedFilesRepository } from "@core/db/repository/rendered_files";
 import type { DB } from "@core/db/client";
+import { buildEmbeddingsProvider } from "@core/embeddings/factory";
+import type { EmbeddingsProvider } from "@core/embeddings/provider";
 import type { LLMProvider } from "@core/llm/provider";
 import { autoCommit } from "@core/git";
-import { dedupEntity } from "@core/pipeline/dedup";
+import { dedupEntity, type EmbeddingsDedupOptions } from "@core/pipeline/dedup";
 import { executeDecision, type ExecuteResult } from "@core/pipeline/execute";
 import { extractEntities } from "@core/pipeline/extract";
 import { renderDirty } from "@core/pipeline/render";
@@ -14,6 +17,11 @@ export interface RunPipelineInput {
   conversationId: string;
   /** Vault-relative path to the raw conversation .md. */
   conversationPath: string;
+}
+
+export interface RunPipelineOptions {
+  /** Inject an embeddings provider; bypasses the config-driven factory. */
+  embeddingsProvider?: EmbeddingsProvider | null;
 }
 
 export interface RunPipelineResult {
@@ -28,14 +36,16 @@ export interface RunPipelineResult {
  *   1. read raw conversation md
  *   2. extract entity candidates (LLM)
  *   3. for each candidate: dedup → execute (insert new OR rewrite existing)
- *   4. render any dirty entity md (eager mode)
- *   5. git auto-commit per render (config-gated)
+ *   4. (Stage 5) upsert embedding row for the touched entity
+ *   5. render any dirty entity md (eager mode)
+ *   6. git auto-commit per render (config-gated)
  */
 export async function runStage2Pipeline(
   config: Config,
   db: DB,
   llm: LLMProvider,
   input: RunPipelineInput,
+  options: RunPipelineOptions = {},
 ): Promise<RunPipelineResult> {
   const raw = new MarkdownVaultRepository(config.vault.path);
   const conversation = await raw.readConversation(input.conversationPath);
@@ -51,6 +61,19 @@ export async function runStage2Pipeline(
 
   const entitiesRepo = new EntitiesRepository(db);
   const renderedRepo = new RenderedFilesRepository(db);
+  const dedupEmbeddingsRepo = new DedupEmbeddingsRepository(db);
+  const embeddingsProvider =
+    options.embeddingsProvider !== undefined
+      ? options.embeddingsProvider
+      : buildEmbeddingsProvider(config);
+  const embeddingsOpt: EmbeddingsDedupOptions | undefined = embeddingsProvider
+    ? {
+        provider: embeddingsProvider,
+        repo: dedupEmbeddingsRepo,
+        topK: config.dedup.fuzzy.embeddings.top_k,
+        minCosine: config.dedup.fuzzy.embeddings.min_cosine,
+      }
+    : undefined;
   const results: ExecuteResult[] = [];
 
   for (const candidate of candidates) {
@@ -58,6 +81,7 @@ export async function runStage2Pipeline(
       topK: config.dedup.fuzzy.top_k,
       minScore: config.dedup.fuzzy.min_score,
       llmConfirm: config.dedup.fuzzy.llm_confirm,
+      ...(embeddingsOpt ? { embeddings: embeddingsOpt } : {}),
     });
     const result = await executeDecision({
       config,
@@ -68,6 +92,31 @@ export async function runStage2Pipeline(
       dedup,
     });
     results.push(result);
+
+    if (embeddingsProvider) {
+      try {
+        const ent = entitiesRepo.findById(result.entityId);
+        if (ent) {
+          const aliases = entitiesRepo.listAliases(ent.id);
+          const text = [ent.name, ent.summary, ...aliases]
+            .filter(Boolean)
+            .join(" ")
+            .trim();
+          if (text.length > 0) {
+            const vec = await embeddingsProvider.embed(text);
+            dedupEmbeddingsRepo.upsert({
+              entityId: ent.id,
+              vector: vec,
+              model: embeddingsProvider.model,
+            });
+          }
+        }
+      } catch (err) {
+        process.stderr.write(
+          `[dedup] embed-after-execute failed for ${result.entityId}: ${(err as Error).message}\n`,
+        );
+      }
+    }
   }
 
   let rendered = { written: [] as string[], deleted: [] as string[], driftStaged: [] as string[] };
