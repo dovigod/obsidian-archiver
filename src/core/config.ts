@@ -177,8 +177,8 @@ export const ConfigSchema = z.object({
 export type Config = z.infer<typeof ConfigSchema>;
 export type PartialConfig = z.input<typeof ConfigSchema>;
 
-const GLOBAL_CONFIG_PATH = join(homedir(), ".knowledge-hub", "config.json");
-const PROJECT_CONFIG_REL = join(".knowledge-hub", "config.json");
+export const GLOBAL_CONFIG_PATH = join(homedir(), ".knowledge-hub", "config.json");
+export const PROJECT_CONFIG_REL = join(".knowledge-hub", "config.json");
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return (
@@ -245,8 +245,12 @@ export function loadConfig(options: LoadConfigOptions = {}): Config {
     const issues = parsed.error.issues
       .map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`)
       .join("\n  ");
+    const firstRunHint =
+      globalRaw === undefined && projectRaw === undefined
+        ? "\n\nNo config file was found. Run `kh setup` for an interactive first-time setup,\nor create one of the searched files manually."
+        : "";
     throw new Error(
-      `Invalid knowledge-hub config:\n  ${issues}\n\nSearched:\n  global=${GLOBAL_CONFIG_PATH}\n  project=${join(projectRoot, PROJECT_CONFIG_REL)}`,
+      `Invalid knowledge-hub config:\n  ${issues}\n\nSearched:\n  global=${GLOBAL_CONFIG_PATH}\n  project=${join(projectRoot, PROJECT_CONFIG_REL)}${firstRunHint}`,
     );
   }
   return parsed.data;

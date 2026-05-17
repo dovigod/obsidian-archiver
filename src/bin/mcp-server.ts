@@ -67,7 +67,20 @@ const archiveInputJsonSchema = {
 const processingQueue = new SequentialQueue();
 
 async function main(): Promise<void> {
-  const config = loadConfig();
+  let config: ReturnType<typeof loadConfig>;
+  try {
+    config = loadConfig();
+  } catch (err) {
+    const msg = (err as Error).message ?? String(err);
+    if (msg.includes("No config file was found")) {
+      process.stderr.write(
+        "knowledge-hub: no configuration found.\n" +
+          "Run `kh setup` (or `pnpm dev:cli setup`) to create one.\n",
+      );
+      process.exit(2);
+    }
+    throw err;
+  }
   const { db, sqlite } = createDb({
     path: join(config.vault.path, config.storage.sqlite.path),
     journalMode: config.storage.sqlite.journal_mode,

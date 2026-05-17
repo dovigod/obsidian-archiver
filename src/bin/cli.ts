@@ -24,6 +24,11 @@ import { reconcile } from "@core/pipeline/reconcile";
 import { renderDirty } from "@core/pipeline/render";
 import { ProposalRepository } from "@core/repository/proposals";
 import {
+  SetupAbortedError,
+  type SetupAnswers,
+  interactiveSetup,
+} from "@core/setup";
+import {
   SMART_CONNECTIONS_DOC_FILENAME,
   detectSmartConnections,
 } from "@core/smart-connections";
@@ -125,6 +130,7 @@ function printUsage(): void {
       "knowledge-hub CLI",
       "",
       "Usage:",
+      "  kh setup [--scope global|project] [--vault PATH] [--force]",
       "  kh init <vault-path>",
       "  kh archive-transcript <path> [--source claude-code|chatgpt|gemini]",
       "                               [--project NAME]... [--tag TAG]...",
@@ -156,6 +162,43 @@ function openDbFromConfig() {
     migrate: true,
   });
   return { config, db, sqlite };
+}
+
+async function runSetup(args: ParsedArgs): Promise<number> {
+  const scopeOpt = asString(args.options.scope);
+  let scope: "global" | "project" | undefined;
+  if (scopeOpt === "global" || scopeOpt === "project") {
+    scope = scopeOpt;
+  } else if (scopeOpt !== undefined) {
+    process.stderr.write(
+      `error: --scope must be "global" or "project", got "${scopeOpt}"\n`,
+    );
+    return 2;
+  }
+  const vaultOpt = asString(args.options.vault);
+  const force = args.options.force === true;
+
+  const answers: Partial<SetupAnswers> = {};
+  if (scope) {
+    answers.scope = scope;
+  }
+  if (vaultOpt) {
+    answers.vaultPath = vaultOpt;
+  }
+  if (force) {
+    answers.overwrite = true;
+  }
+
+  try {
+    await interactiveSetup({ answers });
+    return 0;
+  } catch (err) {
+    if (err instanceof SetupAbortedError) {
+      process.stderr.write(`${err.message}\n`);
+      return 1;
+    }
+    throw err;
+  }
 }
 
 async function runInit(args: ParsedArgs): Promise<number> {
@@ -596,6 +639,8 @@ async function main(): Promise<number> {
     return args.command ? 0 : 1;
   }
   switch (args.command) {
+    case "setup":
+      return runSetup(args);
     case "init":
       return runInit(args);
     case "archive-transcript":

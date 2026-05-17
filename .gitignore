@@ -8,6 +8,7 @@ dist/
 
 # Local config / vault default location (override per-project)
 .knowledge-hub/
+vault/
 
 # SQLite (Knowledge Hub vault state — rebuildable from raw md via `kh reconcile`)
 *.kh.db
