@@ -6,12 +6,26 @@ import { JobsRepository, type ClaimedJob } from "@core/db/repository/jobs";
 import { ClaudeProvider } from "@core/llm/claude";
 import { ClaudeCliProvider } from "@core/llm/claude-cli";
 import type { LLMProvider } from "@core/llm/provider";
+import { loggerFromConfig, NULL_LOGGER, type Logger } from "@core/log";
+import { runNotesPipeline } from "@core/pipeline/notes";
 import { runStage2Pipeline } from "@core/pipeline/run";
 
 export interface RunWorkerOptions {
   pollIntervalMs?: number;
   /** Stop after one drain cycle (used for tests / one-shot CI runs). */
   once?: boolean;
+  /**
+   * Abort to stop the drain loop. Used by the MCP server to shut the
+   * in-process worker down when the stdio transport closes; without it the
+   * idle poll timer would keep the event loop alive forever.
+   */
+  signal?: AbortSignal;
+  /**
+   * Wrap each job's processing. The MCP server passes its SequentialQueue
+   * here so Stage 2 runs strictly serialized with `archive_conversation`
+   * raw writes + git commits in the same process.
+   */
+  serialize?: (fn: () => Promise<void>) => Promise<void>;
   /** Inject an LLM (for tests). When omitted, builds a Claude provider from config. */
   llm?: LLMProvider;
   /** Inject a config (for tests). When omitted, loads from disk. */
@@ -20,6 +34,8 @@ export interface RunWorkerOptions {
   db?: DB;
   /** Companion sqlite handle when `db` is injected. */
   sqlite?: SqliteHandle;
+  /** Inject a logger (tests). When omitted, built from `config.logging`. */
+  logger?: Logger;
 }
 
 export async function runWorker(opts: RunWorkerOptions = {}): Promise<void> {
@@ -40,10 +56,25 @@ export async function runWorker(opts: RunWorkerOptions = {}): Promise<void> {
     sqlite = opened.sqlite;
     ownsDb = true;
   }
-  const llm = opts.llm ?? buildLLMFromConfig(config);
+  const log = opts.logger ?? loggerFromConfig(config.logging, "worker");
+  let llm: LLMProvider;
+  try {
+    llm = opts.llm ?? buildLLMFromConfig(config);
+  } catch (err) {
+    log.error("worker.llm_init_failed", { error: (err as Error).message });
+    throw err;
+  }
+  const serialize = opts.serialize ?? ((fn: () => Promise<void>) => fn());
+  const signal = opts.signal;
   const jobsRepo = new JobsRepository(db, sqlite);
 
-  jobsRepo.reclaimStuck();
+  const reclaimed = jobsRepo.reclaimStuck();
+  log.info("worker.start", {
+    poll_ms: pollIntervalMs,
+    once: opts.once ?? false,
+    reclaimed_stuck: reclaimed,
+    pending: jobsRepo.countByState("pending"),
+  });
 
   let stop = false;
   const onSig = (): void => {
@@ -53,18 +84,23 @@ export async function runWorker(opts: RunWorkerOptions = {}): Promise<void> {
   process.on("SIGTERM", onSig);
 
   try {
-    while (!stop) {
+    while (!stop && !signal?.aborted) {
       const job = jobsRepo.claim();
       if (!job) {
         if (opts.once) {
           return;
         }
-        await delay(pollIntervalMs);
+        try {
+          await delay(pollIntervalMs, undefined, signal ? { signal } : {});
+        } catch {
+          return; // aborted while idle
+        }
         continue;
       }
-      await processJob(jobsRepo, db, job, config, llm);
+      await serialize(() => processJob(jobsRepo, db, job, config, llm, log));
     }
   } finally {
+    log.info("worker.stop", { reason: stop ? "signal" : "aborted" });
     process.off("SIGINT", onSig);
     process.off("SIGTERM", onSig);
     if (ownsDb) {
@@ -79,22 +115,53 @@ async function processJob(
   job: ClaimedJob,
   config: Config,
   llm: LLMProvider,
+  log: Logger = NULL_LOGGER,
 ): Promise<void> {
+  const startedAt = Date.now();
+  log.info("job.start", {
+    id: job.id,
+    type: job.type,
+    attempt: job.attempts,
+    conversation: job.payload.conversation_id,
+  });
   try {
     if (job.type === "extract") {
-      await runStage2Pipeline(config, db, llm, {
+      const result = await runStage2Pipeline(config, db, llm, {
         conversationId: String(job.payload.conversation_id),
         conversationPath: String(job.payload.conversation_path),
       });
       jobsRepo.complete(job.id);
+      log.info("job.done", {
+        id: job.id,
+        duration_ms: Date.now() - startedAt,
+        entities: result.entities.length,
+        rendered: result.rendered.written.length,
+      });
+    } else if (job.type === "notes") {
+      const result = await runNotesPipeline(config, llm, {
+        conversationId: String(job.payload.conversation_id),
+        conversationPath: String(job.payload.conversation_path),
+      });
+      jobsRepo.complete(job.id);
+      log.info("job.done", {
+        id: job.id,
+        duration_ms: Date.now() - startedAt,
+        notes: result.notes.length,
+        canvases: result.canvases.length,
+      });
     } else {
       throw new Error(`unknown job type: ${job.type}`);
     }
   } catch (err) {
     jobsRepo.fail(job.id, (err as Error).message);
-    process.stderr.write(
-      `[knowledge-hub] job ${job.id} failed: ${(err as Error).message}\n`,
-    );
+    const after = jobsRepo.findById(job.id);
+    log.error("job.fail", {
+      id: job.id,
+      duration_ms: Date.now() - startedAt,
+      attempt: job.attempts,
+      error: (err as Error).message,
+      will_retry: after?.state === "pending",
+    });
   }
 }
 
@@ -111,12 +178,17 @@ function buildLLMFromConfig(config: Config): LLMProvider {
     const apiKeyEnv = config.extract.llm.api_key_env;
     const apiKey = process.env[apiKeyEnv];
     if (!apiKey) {
-      throw new Error(`Missing API key: env var ${apiKeyEnv} is not set`);
+      throw new Error(
+        `Missing API key: env var ${apiKeyEnv} is not set.\n` +
+          `Either export ${apiKeyEnv}, or switch to subscription auth by setting\n` +
+          `  extract.llm.provider = "claude-cli"\n` +
+          `in your knowledge-hub config (or re-run \`kh setup --llm claude-cli\`).`,
+      );
     }
     return new ClaudeProvider({ apiKey, model });
   }
 
   throw new Error(
-    `Unsupported LLM provider "${provider}". Use "claude" or "claude-cli".`,
+    `Unsupported LLM provider "${provider}". Use "claude" (API key) or "claude-cli" (subscription).`,
   );
 }

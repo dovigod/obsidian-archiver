@@ -179,5 +179,5 @@ export type RenderedFileRow = typeof renderedFiles.$inferSelect;
 export type NewRenderedFileRow = typeof renderedFiles.$inferInsert;
 
 export type JobState = "pending" | "running" | "done" | "failed";
-export type JobType = "extract" | "rewrite" | "render";
+export type JobType = "extract" | "rewrite" | "render" | "notes";
 export type RenderedFileKind = "entity";

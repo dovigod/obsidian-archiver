@@ -131,6 +131,8 @@ function printUsage(): void {
       "",
       "Usage:",
       "  kh setup [--scope global|project] [--vault PATH] [--force]",
+      "           [--llm claude|claude-cli]",
+      "           [--auto-push] [--push-remote URL] [--github-token TOKEN]",
       "  kh init <vault-path>",
       "  kh archive-transcript <path> [--source claude-code|chatgpt|gemini]",
       "                               [--project NAME]... [--tag TAG]...",
@@ -177,6 +179,20 @@ async function runSetup(args: ParsedArgs): Promise<number> {
   }
   const vaultOpt = asString(args.options.vault);
   const force = args.options.force === true;
+  const llmOpt = asString(args.options.llm);
+  let llm: "claude" | "claude-cli" | undefined;
+  if (llmOpt === "claude" || llmOpt === "claude-cli") {
+    llm = llmOpt;
+  } else if (llmOpt === "subscription" || llmOpt === "sub" || llmOpt === "s") {
+    llm = "claude-cli";
+  } else if (llmOpt === "api" || llmOpt === "a") {
+    llm = "claude";
+  } else if (llmOpt !== undefined) {
+    process.stderr.write(
+      `error: --llm must be "claude" or "claude-cli" (got "${llmOpt}")\n`,
+    );
+    return 2;
+  }
 
   const answers: Partial<SetupAnswers> = {};
   if (scope) {
@@ -187,6 +203,22 @@ async function runSetup(args: ParsedArgs): Promise<number> {
   }
   if (force) {
     answers.overwrite = true;
+  }
+  if (llm) {
+    answers.llm = llm;
+  }
+  if (args.options["auto-push"] === true) {
+    answers.autoPush = true;
+  } else if (args.options["no-auto-push"] === true) {
+    answers.autoPush = false;
+  }
+  const pushRemote = asString(args.options["push-remote"]);
+  if (pushRemote) {
+    answers.pushRemoteUrl = pushRemote;
+  }
+  const ghToken = asString(args.options["github-token"]);
+  if (ghToken) {
+    answers.githubToken = ghToken;
   }
 
   try {

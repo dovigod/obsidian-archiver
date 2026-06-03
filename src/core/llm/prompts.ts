@@ -11,7 +11,10 @@ export type PromptName =
   | "obsidian-markdown"
   | "extract"
   | "dedup"
-  | "rewrite";
+  | "rewrite"
+  | "notes-plan"
+  | "notes-write"
+  | "notes-canvas";
 
 const cache = new Map<PromptName, string>();
 

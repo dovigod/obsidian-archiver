@@ -40,7 +40,11 @@ export const ConfigSchema = z.object({
     }),
   capture: z
     .object({
-      mode: z.nativeEnum(CaptureMode).default(CaptureMode.Auto),
+      // Intent-driven by default: the MCP `archive_conversation` tool is only
+      // invoked when the user explicitly asks (Claude Code reads the tool's
+      // description and decides). `auto` is opt-in for users who wire a Claude
+      // Code Stop hook to `kh archive-transcript`.
+      mode: z.nativeEnum(CaptureMode).default(CaptureMode.Manual),
       sources: z
         .object({
           claude_code: z.boolean().default(true),
@@ -48,7 +52,7 @@ export const ConfigSchema = z.object({
         .default({ claude_code: true }),
     })
     .default({
-      mode: CaptureMode.Auto,
+      mode: CaptureMode.Manual,
       sources: { claude_code: true },
     }),
   extract: z
@@ -165,13 +169,45 @@ export const ConfigSchema = z.object({
     .object({
       auto_commit: z.boolean().default(true),
       commit_per_render: z.boolean().default(true),
+      /** Push to the configured remote after every successful auto-commit. */
+      auto_push: z.boolean().default(false),
+      push: z
+        .object({
+          remote: z.string().default("origin"),
+          /** Empty string = push the currently checked-out branch. */
+          branch: z.string().default(""),
+          /**
+           * GitHub (or other host) access token used for https remotes.
+           * Prefer `token_env`; `token` is a convenience for the
+           * single-user desktop deployment (config.json is private).
+           * SSH remotes need neither — keys are used as usual.
+           */
+          token: z.string().optional(),
+          /** Env var consulted when `token` is not set. */
+          token_env: z.string().default("GITHUB_TOKEN"),
+        })
+        .default({ remote: "origin", branch: "", token_env: "GITHUB_TOKEN" }),
     })
-    .default({ auto_commit: true, commit_per_render: true }),
+    .default({
+      auto_commit: true,
+      commit_per_render: true,
+      auto_push: false,
+      push: { remote: "origin", branch: "", token_env: "GITHUB_TOKEN" },
+    }),
   ids: z
     .object({
       strategy: z.nativeEnum(IdStrategy).default(IdStrategy.UuidV7),
     })
     .default({ strategy: IdStrategy.UuidV7 }),
+  logging: z
+    .object({
+      enabled: z.boolean().default(true),
+      /** Log file path. Empty = ~/.knowledge-hub/logs/knowledge-hub.log */
+      path: z.string().default(""),
+      /** Mirror log lines to stderr (shows up in Claude Code's MCP logs). */
+      stderr: z.boolean().default(true),
+    })
+    .default({ enabled: true, path: "", stderr: true }),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;

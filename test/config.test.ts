@@ -30,7 +30,7 @@ describe("loadConfig", () => {
 
     const cfg = loadConfig({ projectRoot: dir, skipGlobal: true });
     expect(cfg.vault.path).toBe(join(dir, "vault"));
-    expect(cfg.capture.mode).toBe("auto");
+    expect(cfg.capture.mode).toBe("manual");
     expect(cfg.extract.llm.provider).toBe("claude");
     expect(cfg.storage.sqlite.path).toBe(".kh.db");
     expect(cfg.storage.sqlite.journal_mode).toBe("WAL");

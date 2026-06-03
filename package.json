@@ -9,11 +9,13 @@
   },
   "bin": {
     "kh": "dist/bin/cli.js",
-    "kh-mcp": "dist/bin/mcp-server.js"
+    "kh-mcp": "dist/bin/mcp-server.js",
+    "kh-mcp-http": "dist/bin/mcp-http-server.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json && tsc-alias -p tsconfig.build.json --resolve-full-paths && node scripts/copy-prompts.mjs",
     "dev:mcp": "tsx src/bin/mcp-server.ts",
+    "dev:mcp-http": "tsx src/bin/mcp-http-server.ts",
     "dev:cli": "tsx src/bin/cli.ts",
     "dev:worker": "tsx src/bin/cli.ts worker",
     "pretest": "node -e \"require('fs').rmSync('test_result',{recursive:true,force:true})\"",
@@ -23,7 +25,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "drizzle-kit migrate"
+    "db:migrate": "drizzle-kit migrate",
+    "tunnel" : "npx cloudflared tunnel --protocol http2 --url http://localhost:8000"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",

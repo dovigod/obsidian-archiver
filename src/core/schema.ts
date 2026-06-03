@@ -1,8 +1,14 @@
 import { z } from "zod";
+import { ArchiveScope } from "@constants/archive-scope";
+import { Fidelity } from "@constants/fidelity";
 import { Role } from "@constants/role";
 import { Source } from "@constants/source";
 
-export { Role, Source };
+export { ArchiveScope, Fidelity, Role, Source };
+
+export const ArchiveScopeSchema = z.nativeEnum(ArchiveScope);
+
+export const FidelitySchema = z.nativeEnum(Fidelity);
 
 export const SourceSchema = z.nativeEnum(Source);
 
@@ -37,6 +43,37 @@ export const ConversationSchema = z.object({
   tags: z.array(z.string()).default([]),
   git: GitContextSchema.optional(),
   messages: z.array(MessageSchema).min(1),
+  /** Triggering user phrase that caused this conversation to be archived. */
+  intent: z.string().optional(),
+  /** One-or-two-sentence TL;DR rendered above the verbatim transcript. */
+  summary: z.string().optional(),
+  /** Bulleted highlights rendered between TL;DR and Entities. */
+  takeaways: z.array(z.string()).optional(),
+  /** Bare entity names; renderer wraps them as `[[Wikilinks]]`. */
+  entities: z.array(z.string()).optional(),
+  /** Follow-up questions a reader might want to ask after the conversation. */
+  related_questions: z.array(z.string()).optional(),
+  /**
+   * True when the transcript is best-effort rather than complete — e.g. a
+   * remote caller (ChatGPT) whose context no longer holds the full original
+   * text. A later lossless import (official export backfill) may supersede
+   * this record.
+   */
+  partial: z.boolean().optional(),
+  /**
+   * What slice of the source conversation this record holds. Omitted (or
+   * `full`) = the whole conversation; `answer` = a single Q&A excerpt
+   * captured via the `archive_answer` MCP tool.
+   */
+  scope: ArchiveScopeSchema.optional(),
+  /**
+   * Transcript fidelity. Omitted (or `verbatim`) = original text. The HTTP
+   * MCP server stamps `summarized` on every capture because remote models
+   * (observed: ChatGPT) compress their own turns when serializing the
+   * conversation into tool arguments — the lossless original lives in the
+   * platform's official data export.
+   */
+  fidelity: FidelitySchema.optional(),
 });
 export type Conversation = z.infer<typeof ConversationSchema>;
 
@@ -52,6 +89,14 @@ export const ArchiveInputSchema = z.object({
   git: GitContextSchema.optional(),
   messages: z.array(MessageSchema).min(1),
   metadata: z.record(z.unknown()).optional(),
+  /** Triggering user phrase (e.g. "sync to kh"). Promoted to frontmatter. */
+  intent: z.string().optional(),
+  /** Caller could not reconstruct the complete transcript; archive best-effort. */
+  partial: z.boolean().optional(),
+  /** `answer` when the payload is a single Q&A excerpt, not a full transcript. */
+  scope: ArchiveScopeSchema.optional(),
+  /** `summarized` when the transcript content is model-compressed, not original. */
+  fidelity: FidelitySchema.optional(),
 });
 export type ArchiveInput = z.infer<typeof ArchiveInputSchema>;
 
@@ -113,6 +158,62 @@ export type DedupOutput = z.infer<typeof DedupOutputSchema>;
 export type DedupResult =
   | { kind: "match"; entityId: string; matchedTerm?: string }
   | { kind: "new" };
+
+// ---------------------------------------------------------------------------
+// Stage 2 notes pipeline: plan → write → (canvas)
+// ---------------------------------------------------------------------------
+
+/**
+ * One topic-note decision from the notes-plan LLM call. Topics are grouped
+ * from the USER's questions; similar themes must be merged into one group
+ * (the prompt forbids over-splitting). `action: "merge"` targets an existing
+ * `notes/{target}` file; `needs_canvas` is true when the user's questions
+ * showed they struggled with the topic (re-asking, "explain it simply", …)
+ * OR the content explains an overall flow/process/architecture.
+ */
+export const NotesPlanEntrySchema = z.object({
+  action: z.enum(["create", "merge"]),
+  /** Existing note filename (e.g. "Bitcoin_Transactions.md") when merging. */
+  target: z.string().optional(),
+  title: z.string().min(1),
+  topics: z.array(z.string()).default([]),
+  /** 0-based indexes into the conversation's assistant messages. */
+  assistant_indexes: z.array(z.number().int().nonnegative()).default([]),
+  needs_canvas: z.boolean().default(false),
+});
+export type NotesPlanEntry = z.infer<typeof NotesPlanEntrySchema>;
+
+export const NotesPlanSchema = z.object({
+  notes: z.array(NotesPlanEntrySchema).default([]),
+});
+export type NotesPlan = z.infer<typeof NotesPlanSchema>;
+
+/**
+ * Concept-graph spec the notes-canvas LLM call returns for a topic the user
+ * struggled with. The server lays the nodes out into a JSON Canvas file —
+ * the LLM never emits raw .canvas coordinates.
+ */
+export const NotesCanvasSpecSchema = z.object({
+  nodes: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        label: z.string().min(1),
+        kind: z.enum(["concept", "step", "example"]).default("concept"),
+      }),
+    )
+    .default([]),
+  edges: z
+    .array(
+      z.object({
+        from: z.string().min(1),
+        to: z.string().min(1),
+        label: z.string().optional(),
+      }),
+    )
+    .default([]),
+});
+export type NotesCanvasSpec = z.infer<typeof NotesCanvasSpecSchema>;
 
 // ---- Proposal records (file-based; no DB table) --------------------------
 

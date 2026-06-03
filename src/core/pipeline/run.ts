@@ -6,7 +6,7 @@ import type { DB } from "@core/db/client";
 import { buildEmbeddingsProvider } from "@core/embeddings/factory";
 import type { EmbeddingsProvider } from "@core/embeddings/provider";
 import type { LLMProvider } from "@core/llm/provider";
-import { autoCommit } from "@core/git";
+import { autoCommit, pushVault, resolvePushToken } from "@core/git";
 import { dedupEntity, type EmbeddingsDedupOptions } from "@core/pipeline/dedup";
 import { executeDecision, type ExecuteResult } from "@core/pipeline/execute";
 import { extractEntities } from "@core/pipeline/extract";
@@ -129,11 +129,27 @@ export async function runStage2Pipeline(
       const files = [...rendered.written, ...rendered.deleted].map(
         (rel) => `${config.vault.path}/${rel}`,
       );
-      await autoCommit({
+      // Entity names in the subject so `git log` shows what knowledge changed.
+      const names = rendered.written
+        .map((rel) => rel.replace(/^.*\//, "").replace(/\.md$/, "").replace(/_/g, " "))
+        .join(", ");
+      const subject = names.length > 0 ? names : "(deletes only)";
+      const committed = await autoCommit({
         vaultPath: config.vault.path,
         files,
-        message: `sync: +${rendered.written.length} -${rendered.deleted.length}`,
+        message:
+          `sync: ${subject.length > 60 ? `${subject.slice(0, 59)}…` : subject} ` +
+          `(+${rendered.written.length} -${rendered.deleted.length})`,
       });
+      if (committed && config.git.auto_push) {
+        const token = resolvePushToken(config.git.push);
+        await pushVault({
+          vaultPath: config.vault.path,
+          remote: config.git.push.remote,
+          branch: config.git.push.branch,
+          ...(token ? { token } : {}),
+        });
+      }
     }
   }
 

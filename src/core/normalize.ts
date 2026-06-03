@@ -1,8 +1,10 @@
 import { newId } from "@core/ids";
 import {
   type ArchiveInput,
+  ArchiveScope,
   type Conversation,
   ConversationSchema,
+  Fidelity,
 } from "@core/schema";
 
 function uniqueNonEmpty(values: readonly string[] | undefined): string[] {
@@ -23,6 +25,7 @@ function uniqueNonEmpty(values: readonly string[] | undefined): string[] {
 }
 
 export function normalizeArchiveInput(input: ArchiveInput): Conversation {
+  const intent = input.intent?.trim() || undefined;
   const conv: Conversation = ConversationSchema.parse({
     id: newId(),
     source: input.source,
@@ -35,6 +38,16 @@ export function normalizeArchiveInput(input: ArchiveInput): Conversation {
     tags: uniqueNonEmpty(input.tags),
     git: input.git,
     messages: input.messages,
+    ...(intent ? { intent } : {}),
+    ...(input.partial ? { partial: true } : {}),
+    // Only persist the non-default scope, same as `partial`.
+    ...(input.scope === ArchiveScope.Answer
+      ? { scope: ArchiveScope.Answer }
+      : {}),
+    // Only persist the non-default fidelity (verbatim is implied).
+    ...(input.fidelity === Fidelity.Summarized
+      ? { fidelity: Fidelity.Summarized }
+      : {}),
   });
   return conv;
 }

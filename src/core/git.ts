@@ -76,3 +76,87 @@ export async function autoCommit(opts: GitAutoCommitOptions): Promise<boolean> {
   );
   return false;
 }
+
+export interface GitPushOptions {
+  /** Vault root (git working tree). */
+  vaultPath: string;
+  /** Remote name. Defaults to "origin". */
+  remote?: string;
+  /** Branch to push. Empty/omitted = currently checked-out branch. */
+  branch?: string;
+  /**
+   * Access token for https remotes (GitHub PAT etc.). Pushed via a one-off
+   * authenticated URL — never written to git config. Ignored for SSH remotes.
+   */
+  token?: string;
+}
+
+/**
+ * Build a one-off authenticated push URL for an https remote.
+ * Returns null for non-https remotes (SSH pushes use keys as usual).
+ */
+export function injectTokenIntoRemoteUrl(
+  url: string,
+  token: string,
+): string | null {
+  if (!url.startsWith("https://")) {
+    return null;
+  }
+  return `https://x-access-token:${encodeURIComponent(token)}@${url.slice("https://".length)}`;
+}
+
+/** Resolve the push token: explicit config value first, then the named env var. */
+export function resolvePushToken(push: {
+  token?: string;
+  token_env: string;
+}): string | undefined {
+  return push.token ?? process.env[push.token_env] ?? undefined;
+}
+
+/**
+ * Push the vault to its configured remote. Mirrors autoCommit's failure
+ * philosophy: never throws — logs to stderr and returns false so archiving
+ * is not blocked by network/auth problems.
+ */
+export async function pushVault(opts: GitPushOptions): Promise<boolean> {
+  const { vaultPath } = opts;
+  const remoteName = opts.remote ?? "origin";
+  if (!existsSync(join(vaultPath, ".git"))) {
+    return false;
+  }
+  const git: SimpleGit = simpleGit({ baseDir: vaultPath });
+  try {
+    const remotes = await git.getRemotes(true);
+    const remote = remotes.find((r) => r.name === remoteName);
+    if (!remote) {
+      process.stderr.write(
+        `[knowledge-hub] git auto-push skipped: no remote "${remoteName}" configured in ${vaultPath}\n`,
+      );
+      return false;
+    }
+    const branch =
+      opts.branch && opts.branch !== ""
+        ? opts.branch
+        : (await git.revparse(["--abbrev-ref", "HEAD"])).trim();
+
+    const remoteUrl = remote.refs.push || remote.refs.fetch;
+    const authedUrl = opts.token
+      ? injectTokenIntoRemoteUrl(remoteUrl, opts.token)
+      : null;
+    if (authedUrl) {
+      await git.push(authedUrl, `HEAD:${branch}`);
+    } else {
+      await git.push(remoteName, branch);
+    }
+    return true;
+  } catch (err) {
+    // Strip any token that leaked into the error message (simple-git echoes
+    // the remote URL on failure).
+    const msg = (err as Error).message.replace(
+      /x-access-token:[^@]+@/g,
+      "x-access-token:***@",
+    );
+    process.stderr.write(`[knowledge-hub] git auto-push failed: ${msg}\n`);
+    return false;
+  }
+}

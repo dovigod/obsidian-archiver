@@ -13,7 +13,9 @@ Companion to `draft.md`. The spec describes the *what*; this document describes 
 - **Validation**: zod
 - **Frontmatter**: gray-matter (raw-conversation md write/parse and rendered entity-md output)
 - **IDs**: uuid v7 (time-ordered)
-- **LLM**: pluggable provider; Claude API as initial impl
+- **LLM**: pluggable provider with two auth modes:
+  - `claude` — Anthropic API key via `@anthropic-ai/sdk` (env: `ANTHROPIC_API_KEY`)
+  - `claude-cli` — shells out to the local `claude` binary; reuses its OAuth subscription credentials (no API key required, but subscription rate limits apply)
 - **Database**: SQLite via `better-sqlite3`, WAL mode, single file at `<vault>/.kh.db`
 - **ORM + migrations**: Drizzle (`drizzle-orm/better-sqlite3` + `drizzle-kit`)
 - **Config loading**: `.env` for secrets (loaded via `dotenv`); JSON config for behavior (`~/.knowledge-hub/config.json` + per-project overrides)
@@ -86,9 +88,11 @@ Schema (validated by zod, defaults in code):
     "enabled":   true,
     "execution": "async",
     "llm": {
+      // "claude" → Anthropic API key (requires ANTHROPIC_API_KEY)
+      // "claude-cli" → local `claude` binary subscription (no API key)
       "provider":    "claude",
       "model":       "claude-opus-4-7",
-      "api_key_env": "ANTHROPIC_API_KEY"
+      "api_key_env": "ANTHROPIC_API_KEY"   // ignored when provider="claude-cli"
     }
   },
 
@@ -253,8 +257,21 @@ When new content arrives for an existing entity, the system passes the existing 
 
 ## Capture modes
 
-- **Auto** — Claude Code Stop hook invokes `kh archive-transcript`. Hook never blocks Claude (exits 0 on failure).
-- **Manual** — user calls `archive_conversation` MCP tool from within a Claude Code session.
+Capture is **intent-driven by default** — the Hub does NOT archive every
+Claude Code conversation. The MCP `archive_conversation` tool's description
+instructs the agent to invoke it *only when the user expresses intent to
+save / sync / archive the current conversation* (English or Korean trigger
+phrases like "archive this", "sync to kh", "이거 아카이브해", etc.). The agent
+then passes the full visible conversation history to the tool and records the
+triggering phrase under `metadata.intent`.
+
+- **Manual (intent-driven, default)** — Claude Code calls `archive_conversation`
+  when it detects user intent in a prompt. The whole session conversation is
+  flushed in one call. `capture.mode = "manual"` in the config.
+- **Auto (opt-in)** — a Claude Code Stop hook invokes `kh archive-transcript`
+  after every session. Useful for users who want a complete archive without
+  thinking about it. Hook never blocks Claude (exits 0 on failure).
+  `capture.mode = "auto"`.
 
 Both routes:
 

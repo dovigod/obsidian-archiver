@@ -5,7 +5,7 @@ import type { DB } from "@core/db/client";
 import { ConversationsRepository } from "@core/db/repository/conversations";
 import { JobsRepository } from "@core/db/repository/jobs";
 import type { SqliteHandle } from "@core/db/client";
-import { autoCommit } from "@core/git";
+import { autoCommit, pushVault, resolvePushToken } from "@core/git";
 import { newId } from "@core/ids";
 import { normalizeArchiveInput } from "@core/normalize";
 import { MarkdownVaultRepository } from "@core/repository/raw";
@@ -19,6 +19,8 @@ export interface ArchiveResult {
   relativePath: string;
   /** Job id of the queued extract job. */
   extractJobId: string;
+  /** Job id of the queued topic-notes job. */
+  notesJobId: string;
   committed: boolean;
   /** sha256 of normalized messages — used for backfill idempotency. */
   contentHash: string;
@@ -65,6 +67,42 @@ export interface ArchiveOptions {
   skipDuplicates?: boolean;
 }
 
+function truncate(text: string, max: number): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
+}
+
+/**
+ * Human-readable commit message: WHAT was archived, not just an id.
+ * Subject favors explicit topics, then the first user question; the body
+ * lists the user's questions so `git log` doubles as an archive index.
+ */
+export function commitMessageForConversation(conv: Conversation): string {
+  const questions = conv.messages
+    .filter((m) => m.role === "user")
+    .map((m) => truncate(m.content, 80))
+    .filter((q) => q.length > 0);
+  const subjectBase = conv.topics.length
+    ? conv.topics.join(", ")
+    : questions[0] ?? conv.id;
+  const lines = [`archive(raw): ${truncate(subjectBase, 60)}`, ""];
+  lines.push(`source: ${conv.source}${conv.model ? ` (${conv.model})` : ""}`);
+  if (conv.intent) {
+    lines.push(`intent: ${truncate(conv.intent, 80)}`);
+  }
+  if (questions.length > 0) {
+    lines.push("questions:");
+    for (const q of questions.slice(0, 8)) {
+      lines.push(`- ${q}`);
+    }
+    if (questions.length > 8) {
+      lines.push(`- … +${questions.length - 8} more`);
+    }
+  }
+  lines.push(`conversation: ${conv.id}`);
+  return lines.join("\n");
+}
+
 export async function archiveConversation(
   deps: ArchiveDeps,
   input: ArchiveInput,
@@ -85,6 +123,7 @@ export async function archiveConversation(
         absolutePath: join(deps.config.vault.path, existing.rawPath),
         relativePath: existing.rawPath,
         extractJobId: "",
+        notesJobId: "",
         committed: false,
         contentHash,
         skippedDuplicate: true,
@@ -121,14 +160,34 @@ export async function archiveConversation(
       conversation_path: relativePath,
     },
   });
+  // Topic notes: drop user turns, lightly edit the assistant content into
+  // explanatory prose grouped by the user's questions (merging into
+  // existing notes/ files when the vault already covers the topic).
+  const notesJobId = jobsRepo.enqueue({
+    id: newId(),
+    type: "notes",
+    payload: {
+      conversation_id: conversation.id,
+      conversation_path: relativePath,
+    },
+  });
 
   let committed = false;
   if (deps.config.git.auto_commit) {
     committed = await autoCommit({
       vaultPath: deps.config.vault.path,
       files: [join(deps.config.vault.path, relativePath)],
-      message: `archive(raw): ${conversation.source} ${conversation.id}`,
+      message: commitMessageForConversation(conversation),
     });
+    if (committed && deps.config.git.auto_push) {
+      const token = resolvePushToken(deps.config.git.push);
+      await pushVault({
+        vaultPath: deps.config.vault.path,
+        remote: deps.config.git.push.remote,
+        branch: deps.config.git.push.branch,
+        ...(token ? { token } : {}),
+      });
+    }
   }
 
   return {
@@ -136,6 +195,7 @@ export async function archiveConversation(
     absolutePath,
     relativePath,
     extractJobId,
+    notesJobId,
     committed,
     contentHash,
   };
