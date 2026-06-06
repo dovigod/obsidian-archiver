@@ -3,7 +3,6 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import * as readline from "node:readline/promises";
-import { simpleGit } from "simple-git";
 import { GLOBAL_CONFIG_PATH, PROJECT_CONFIG_REL } from "@core/config";
 import { initVault, type InitResult } from "@core/init";
 
@@ -26,15 +25,12 @@ export interface SetupAnswers {
    * and the runtime falls back to schema defaults (= API key mode).
    */
   llm?: SetupLLMMode;
-  /** Commit AND push to a git remote after each archive. */
-  autoPush?: boolean;
-  /** Remote URL to configure as `origin` on the vault. Blank = keep existing. */
-  pushRemoteUrl?: string;
   /**
-   * GitHub access token for https pushes, stored under `git.push.token`.
-   * Blank = fall back to $GITHUB_TOKEN at runtime (or SSH keys for SSH remotes).
+   * Commit AND push to a git remote after each archive. The repository URL
+   * and push token are NOT stored in config — they are read from the
+   * environment at runtime (`KH_GIT_REMOTE_URL`, `KH_GIT_TOKEN`/`GITHUB_TOKEN`).
    */
-  githubToken?: string;
+  autoPush?: boolean;
 }
 
 /** Returns true when a `claude` binary is resolvable on PATH. */
@@ -134,8 +130,6 @@ export async function interactiveSetup(
   let overwrite: boolean;
   let llm: SetupLLMMode | undefined = supplied.llm;
   let autoPush: boolean | undefined = supplied.autoPush;
-  let pushRemoteUrl: string | undefined = supplied.pushRemoteUrl;
-  let githubToken: string | undefined = supplied.githubToken;
 
   if (fullyNonInteractive) {
     scope = supplied.scope!;
@@ -217,24 +211,16 @@ export async function interactiveSetup(
         }
       }
 
-      // 4. Git auto-push — commit AND push after each archive.
+      // 4. Git auto-push — commit AND push after each archive. The remote URL
+      // and token live in the environment, not config (set them in .env).
       if (autoPush === undefined) {
         stdout.write(
-          "\nGit auto-push: after each archive, commit AND push the vault to a remote.\n",
+          "\nGit auto-push: after each archive, commit AND push the vault.\n" +
+            "The repository URL and token are read from the environment at\n" +
+            "runtime — set KH_GIT_REMOTE_URL (and KH_GIT_TOKEN / GITHUB_TOKEN\n" +
+            "for https) in your .env before starting the server.\n",
         );
         autoPush = await askYesNo(rl, "Enable auto-push?", false);
-        if (autoPush) {
-          pushRemoteUrl = await ask(
-            rl,
-            "Remote URL (e.g. https://github.com/you/vault.git; blank = keep existing `origin`): ",
-            "",
-          );
-          githubToken = await ask(
-            rl,
-            "GitHub access token for https push (blank = use $GITHUB_TOKEN or SSH keys): ",
-            "",
-          );
-        }
       }
 
       // 5. Confirmation
@@ -243,9 +229,7 @@ export async function interactiveSetup(
         ? `\n  llm:    ${llm === "claude-cli" ? "subscription (claude-cli)" : "api key (ANTHROPIC_API_KEY)"}`
         : "";
       const pushLine = autoPush
-        ? `\n  push:   on (${pushRemoteUrl || "existing origin"}, ${
-            githubToken ? "token in config" : "$GITHUB_TOKEN / SSH"
-          })`
+        ? "\n  push:   on (remote URL + token from env: KH_GIT_REMOTE_URL, KH_GIT_TOKEN/GITHUB_TOKEN)"
         : "";
       stdout.write(
         `\nAbout to write:\n  config: ${configPath}\n  vault:  ${vaultPath}${llmLine}${pushLine}\n\n`,
@@ -291,32 +275,13 @@ export async function interactiveSetup(
     configPayload.extract = { llm: { provider: llm } };
   }
   if (autoPush) {
-    configPayload.git = {
-      auto_push: true,
-      ...(githubToken ? { push: { token: githubToken } } : {}),
-    };
+    configPayload.git = { auto_push: true };
   }
 
   mkdirSync(dirname(configPath), { recursive: true });
   writeFileSync(configPath, `${JSON.stringify(configPayload, null, 2)}\n`);
 
   const initResult = await initVault(vaultPath);
-
-  // Wire the push remote onto the vault repo (set-url when origin exists).
-  let remoteWarning: string | undefined;
-  if (autoPush && pushRemoteUrl) {
-    try {
-      const git = simpleGit({ baseDir: vaultPath });
-      const remotes = await git.getRemotes();
-      if (remotes.some((r) => r.name === "origin")) {
-        await git.remote(["set-url", "origin", pushRemoteUrl]);
-      } else {
-        await git.addRemote("origin", pushRemoteUrl);
-      }
-    } catch (err) {
-      remoteWarning = (err as Error).message;
-    }
-  }
 
   const llmNote =
     llm === "claude-cli"
@@ -336,13 +301,11 @@ export async function interactiveSetup(
         : []),
       ...(autoPush
         ? [
-            `✓ auto-push enabled${pushRemoteUrl ? ` → ${pushRemoteUrl}` : " (existing origin)"}`,
-            githubToken
-              ? "  https auth: token stored in config (git.push.token)"
-              : "  https auth: $GITHUB_TOKEN at runtime (SSH remotes use keys)",
+            "✓ auto-push enabled",
+            "  remote URL: $KH_GIT_REMOTE_URL at runtime",
+            "  https auth: $KH_GIT_TOKEN / $GITHUB_TOKEN at runtime (SSH remotes use keys)",
           ]
         : []),
-      ...(remoteWarning ? [`! remote warning: ${remoteWarning}`] : []),
       "",
       "LLM auth:",
       llmNote,

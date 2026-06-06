@@ -1,7 +1,12 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { Config } from "@core/config";
-import { autoCommit, pushVault, resolvePushToken } from "@core/git";
+import {
+  autoCommit,
+  pushVault,
+  resolvePushRemoteUrl,
+  resolvePushToken,
+} from "@core/git";
 import type { LLMProvider } from "@core/llm/provider";
 import { loadPrompt, render } from "@core/llm/prompts";
 import { extractJson } from "@core/pipeline/json";
@@ -178,11 +183,13 @@ export async function runNotesPipeline(
       message: commitMessageForNotes(input.conversationId, written, canvases),
     });
     if (committed && config.git.auto_push) {
-      const token = resolvePushToken(config.git.push);
+      const token = resolvePushToken();
+      const remoteUrl = resolvePushRemoteUrl();
       await pushVault({
         vaultPath: config.vault.path,
         remote: config.git.push.remote,
         branch: config.git.push.branch,
+        ...(remoteUrl ? { remoteUrl } : {}),
         ...(token ? { token } : {}),
       });
     }

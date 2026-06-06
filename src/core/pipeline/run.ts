@@ -6,7 +6,12 @@ import type { DB } from "@core/db/client";
 import { buildEmbeddingsProvider } from "@core/embeddings/factory";
 import type { EmbeddingsProvider } from "@core/embeddings/provider";
 import type { LLMProvider } from "@core/llm/provider";
-import { autoCommit, pushVault, resolvePushToken } from "@core/git";
+import {
+  autoCommit,
+  pushVault,
+  resolvePushRemoteUrl,
+  resolvePushToken,
+} from "@core/git";
 import { dedupEntity, type EmbeddingsDedupOptions } from "@core/pipeline/dedup";
 import { executeDecision, type ExecuteResult } from "@core/pipeline/execute";
 import { extractEntities } from "@core/pipeline/extract";
@@ -142,11 +147,13 @@ export async function runStage2Pipeline(
           `(+${rendered.written.length} -${rendered.deleted.length})`,
       });
       if (committed && config.git.auto_push) {
-        const token = resolvePushToken(config.git.push);
+        const token = resolvePushToken();
+        const remoteUrl = resolvePushRemoteUrl();
         await pushVault({
           vaultPath: config.vault.path,
           remote: config.git.push.remote,
           branch: config.git.push.branch,
+          ...(remoteUrl ? { remoteUrl } : {}),
           ...(token ? { token } : {}),
         });
       }

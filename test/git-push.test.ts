@@ -3,9 +3,11 @@ import { join } from "node:path";
 import { simpleGit } from "simple-git";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  assertGitPushEnv,
   autoCommit,
   injectTokenIntoRemoteUrl,
   pushVault,
+  resolvePushRemoteUrl,
   resolvePushToken,
 } from "@core/git";
 import { prepareVaultRepo, testTmpDir } from "./helpers";
@@ -30,29 +32,67 @@ describe("injectTokenIntoRemoteUrl", () => {
   });
 });
 
-describe("resolvePushToken", () => {
+describe("resolvePushToken / resolvePushRemoteUrl (env-based)", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
   });
 
-  it("prefers the explicit config token over the env var", () => {
-    vi.stubEnv("KH_TEST_GH_TOKEN", "from-env");
-    expect(
-      resolvePushToken({ token: "from-config", token_env: "KH_TEST_GH_TOKEN" }),
-    ).toBe("from-config");
+  it("reads the token from KH_GIT_TOKEN first", () => {
+    vi.stubEnv("KH_GIT_TOKEN", "kh-token");
+    vi.stubEnv("GITHUB_TOKEN", "gh-token");
+    expect(resolvePushToken()).toBe("kh-token");
   });
 
-  it("falls back to the named env var", () => {
-    vi.stubEnv("KH_TEST_GH_TOKEN", "from-env");
-    expect(resolvePushToken({ token_env: "KH_TEST_GH_TOKEN" })).toBe(
-      "from-env",
-    );
+  it("falls back to GITHUB_TOKEN", () => {
+    vi.stubEnv("KH_GIT_TOKEN", "");
+    vi.stubEnv("GITHUB_TOKEN", "gh-token");
+    expect(resolvePushToken()).toBe("gh-token");
   });
 
-  it("returns undefined when neither is set", () => {
-    expect(resolvePushToken({ token_env: "KH_TEST_GH_TOKEN_UNSET" })).toBe(
-      undefined,
-    );
+  it("returns undefined when no token env is set", () => {
+    vi.stubEnv("KH_GIT_TOKEN", "");
+    vi.stubEnv("GITHUB_TOKEN", "");
+    expect(resolvePushToken()).toBeUndefined();
+  });
+
+  it("reads the remote URL from KH_GIT_REMOTE_URL", () => {
+    vi.stubEnv("KH_GIT_REMOTE_URL", "https://github.com/you/vault.git");
+    expect(resolvePushRemoteUrl()).toBe("https://github.com/you/vault.git");
+  });
+});
+
+describe("assertGitPushEnv", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("is a no-op when auto-push is disabled", () => {
+    expect(() => assertGitPushEnv(false)).not.toThrow();
+  });
+
+  it("throws when auto-push is on but KH_GIT_REMOTE_URL is unset", () => {
+    vi.stubEnv("KH_GIT_REMOTE_URL", "");
+    expect(() => assertGitPushEnv(true)).toThrow(/KH_GIT_REMOTE_URL/);
+  });
+
+  it("throws for an https remote without a token", () => {
+    vi.stubEnv("KH_GIT_REMOTE_URL", "https://github.com/you/vault.git");
+    vi.stubEnv("KH_GIT_TOKEN", "");
+    vi.stubEnv("GITHUB_TOKEN", "");
+    expect(() => assertGitPushEnv(true)).toThrow(/token/);
+  });
+
+  it("passes for an https remote with a token", () => {
+    vi.stubEnv("KH_GIT_REMOTE_URL", "https://github.com/you/vault.git");
+    vi.stubEnv("KH_GIT_TOKEN", "ghp_abc123456789");
+    expect(() => assertGitPushEnv(true)).not.toThrow();
+  });
+
+  it("passes for an SSH remote without a token", () => {
+    vi.stubEnv("KH_GIT_REMOTE_URL", "git@github.com:you/vault.git");
+    vi.stubEnv("KH_GIT_TOKEN", "");
+    vi.stubEnv("GITHUB_TOKEN", "");
+    expect(() => assertGitPushEnv(true)).not.toThrow();
   });
 });
 

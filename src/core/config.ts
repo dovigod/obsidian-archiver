@@ -176,23 +176,14 @@ export const ConfigSchema = z.object({
           remote: z.string().default("origin"),
           /** Empty string = push the currently checked-out branch. */
           branch: z.string().default(""),
-          /**
-           * GitHub (or other host) access token used for https remotes.
-           * Prefer `token_env`; `token` is a convenience for the
-           * single-user desktop deployment (config.json is private).
-           * SSH remotes need neither — keys are used as usual.
-           */
-          token: z.string().optional(),
-          /** Env var consulted when `token` is not set. */
-          token_env: z.string().default("GITHUB_TOKEN"),
         })
-        .default({ remote: "origin", branch: "", token_env: "GITHUB_TOKEN" }),
+        .default({ remote: "origin", branch: "" }),
     })
     .default({
       auto_commit: true,
       commit_per_render: true,
       auto_push: false,
-      push: { remote: "origin", branch: "", token_env: "GITHUB_TOKEN" },
+      push: { remote: "origin", branch: "" },
     }),
   ids: z
     .object({

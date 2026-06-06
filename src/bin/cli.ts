@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import "dotenv/config"; // load .env into process.env before anything reads it
 import {
   createReadStream,
   createWriteStream,
@@ -132,7 +133,7 @@ function printUsage(): void {
       "Usage:",
       "  kh setup [--scope global|project] [--vault PATH] [--force]",
       "           [--llm claude|claude-cli]",
-      "           [--auto-push] [--push-remote URL] [--github-token TOKEN]",
+      "           [--auto-push]   # remote URL + token come from env",
       "  kh init <vault-path>",
       "  kh archive-transcript <path> [--source claude-code|chatgpt|gemini]",
       "                               [--project NAME]... [--tag TAG]...",
@@ -211,14 +212,6 @@ async function runSetup(args: ParsedArgs): Promise<number> {
     answers.autoPush = true;
   } else if (args.options["no-auto-push"] === true) {
     answers.autoPush = false;
-  }
-  const pushRemote = asString(args.options["push-remote"]);
-  if (pushRemote) {
-    answers.pushRemoteUrl = pushRemote;
-  }
-  const ghToken = asString(args.options["github-token"]);
-  if (ghToken) {
-    answers.githubToken = ghToken;
   }
 
   try {

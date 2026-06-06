@@ -1,8 +1,10 @@
 #!/usr/bin/env node
+import "dotenv/config"; // load .env into process.env before anything reads it
 import { join } from "node:path";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "@core/config";
 import { createDb } from "@core/db/client";
+import { assertRuntimeEnv } from "@core/env";
 import { JobsRepository } from "@core/db/repository/jobs";
 import { loggerFromConfig } from "@core/log";
 import { createKnowledgeHubServer } from "@core/mcp";
@@ -29,6 +31,9 @@ async function main(): Promise<void> {
     }
     throw err;
   }
+  // Fail fast when required env vars are missing (git auto-push remote/token,
+  // Anthropic API key in API-key mode). Subscription mode skips the key check.
+  assertRuntimeEnv(config);
   const { db, sqlite } = createDb({
     path: join(config.vault.path, config.storage.sqlite.path),
     journalMode: config.storage.sqlite.journal_mode,

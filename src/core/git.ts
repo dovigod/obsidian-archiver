@@ -77,11 +77,22 @@ export async function autoCommit(opts: GitAutoCommitOptions): Promise<boolean> {
   return false;
 }
 
+/** Env var holding the push remote URL (repository address). */
+export const GIT_REMOTE_URL_ENV = "KH_GIT_REMOTE_URL";
+/** Env vars consulted for the https push token, in order. */
+export const GIT_TOKEN_ENVS = ["KH_GIT_TOKEN", "GITHUB_TOKEN"] as const;
+
 export interface GitPushOptions {
   /** Vault root (git working tree). */
   vaultPath: string;
-  /** Remote name. Defaults to "origin". */
+  /** Remote name. Defaults to "origin". Ignored when `remoteUrl` is set. */
   remote?: string;
+  /**
+   * Explicit push remote URL (from env). When set, the vault does not need a
+   * configured remote — the push targets this URL directly. https URLs get
+   * the token injected; SSH URLs use keys as usual.
+   */
+  remoteUrl?: string;
   /** Branch to push. Empty/omitted = currently checked-out branch. */
   branch?: string;
   /**
@@ -105,12 +116,45 @@ export function injectTokenIntoRemoteUrl(
   return `https://x-access-token:${encodeURIComponent(token)}@${url.slice("https://".length)}`;
 }
 
-/** Resolve the push token: explicit config value first, then the named env var. */
-export function resolvePushToken(push: {
-  token?: string;
-  token_env: string;
-}): string | undefined {
-  return push.token ?? process.env[push.token_env] ?? undefined;
+/** Resolve the push token from env: KH_GIT_TOKEN, then GITHUB_TOKEN. */
+export function resolvePushToken(): string | undefined {
+  for (const name of GIT_TOKEN_ENVS) {
+    const value = process.env[name];
+    if (value) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+/** Resolve the push remote URL (repository address) from env. */
+export function resolvePushRemoteUrl(): string | undefined {
+  return process.env[GIT_REMOTE_URL_ENV] || undefined;
+}
+
+/**
+ * Validate the git-push environment at server startup. THROWS when auto-push
+ * is enabled but the required env vars are missing, so a misconfigured server
+ * fails fast instead of silently never pushing. No-op when auto-push is off.
+ */
+export function assertGitPushEnv(autoPush: boolean): void {
+  if (!autoPush) {
+    return;
+  }
+  const remoteUrl = resolvePushRemoteUrl();
+  if (!remoteUrl) {
+    throw new Error(
+      `git.auto_push is enabled but ${GIT_REMOTE_URL_ENV} is not set. ` +
+        `Set the repository push URL in your environment (e.g. .env), or ` +
+        `disable git.auto_push in the config.`,
+    );
+  }
+  if (remoteUrl.startsWith("https://") && !resolvePushToken()) {
+    throw new Error(
+      `git.auto_push targets an https remote (${GIT_REMOTE_URL_ENV}) but no ` +
+        `push token is set. Provide one via ${GIT_TOKEN_ENVS.join(" or ")}.`,
+    );
+  }
 }
 
 /**
@@ -126,25 +170,36 @@ export async function pushVault(opts: GitPushOptions): Promise<boolean> {
   }
   const git: SimpleGit = simpleGit({ baseDir: vaultPath });
   try {
-    const remotes = await git.getRemotes(true);
-    const remote = remotes.find((r) => r.name === remoteName);
-    if (!remote) {
-      process.stderr.write(
-        `[knowledge-hub] git auto-push skipped: no remote "${remoteName}" configured in ${vaultPath}\n`,
-      );
-      return false;
+    // Resolve the push target URL: an explicit env-provided URL wins;
+    // otherwise fall back to the named remote configured on the repo.
+    let remoteUrl = opts.remoteUrl;
+    if (!remoteUrl) {
+      const remotes = await git.getRemotes(true);
+      const remote = remotes.find((r) => r.name === remoteName);
+      if (!remote) {
+        process.stderr.write(
+          `[knowledge-hub] git auto-push skipped: no ${GIT_REMOTE_URL_ENV} set ` +
+            `and no remote "${remoteName}" configured in ${vaultPath}\n`,
+        );
+        return false;
+      }
+      remoteUrl = remote.refs.push || remote.refs.fetch;
     }
     const branch =
       opts.branch && opts.branch !== ""
         ? opts.branch
         : (await git.revparse(["--abbrev-ref", "HEAD"])).trim();
 
-    const remoteUrl = remote.refs.push || remote.refs.fetch;
     const authedUrl = opts.token
       ? injectTokenIntoRemoteUrl(remoteUrl, opts.token)
       : null;
+    // Push to the resolved URL directly (env URL, or the named remote's URL
+    // with a token injected); fall back to the remote name only when we
+    // looked it up from config and have no token to inject.
     if (authedUrl) {
       await git.push(authedUrl, `HEAD:${branch}`);
+    } else if (opts.remoteUrl) {
+      await git.push(remoteUrl, `HEAD:${branch}`);
     } else {
       await git.push(remoteName, branch);
     }

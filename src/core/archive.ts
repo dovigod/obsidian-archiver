@@ -5,7 +5,12 @@ import type { DB } from "@core/db/client";
 import { ConversationsRepository } from "@core/db/repository/conversations";
 import { JobsRepository } from "@core/db/repository/jobs";
 import type { SqliteHandle } from "@core/db/client";
-import { autoCommit, pushVault, resolvePushToken } from "@core/git";
+import {
+  autoCommit,
+  pushVault,
+  resolvePushRemoteUrl,
+  resolvePushToken,
+} from "@core/git";
 import { newId } from "@core/ids";
 import { normalizeArchiveInput } from "@core/normalize";
 import { MarkdownVaultRepository } from "@core/repository/raw";
@@ -180,11 +185,13 @@ export async function archiveConversation(
       message: commitMessageForConversation(conversation),
     });
     if (committed && deps.config.git.auto_push) {
-      const token = resolvePushToken(deps.config.git.push);
+      const token = resolvePushToken();
+      const remoteUrl = resolvePushRemoteUrl();
       await pushVault({
         vaultPath: deps.config.vault.path,
         remote: deps.config.git.push.remote,
         branch: deps.config.git.push.branch,
+        ...(remoteUrl ? { remoteUrl } : {}),
         ...(token ? { token } : {}),
       });
     }
