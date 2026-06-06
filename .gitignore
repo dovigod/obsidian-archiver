@@ -21,3 +21,5 @@ vault/
 # Test artifacts (mkdtemp output preserved for inspection)
 test_result/
 test_result/**/*
+
+.env

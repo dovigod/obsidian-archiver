@@ -10,6 +10,11 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { loadConfig } from "@core/config";
 import { createDb } from "@core/db/client";
 import { JobsRepository } from "@core/db/repository/jobs";
+import {
+  matchBearerToken,
+  resolveAuthTokens,
+  tokenFingerprint,
+} from "@core/mcp-auth";
 import { createKnowledgeHubServer } from "@core/mcp";
 import { Fidelity } from "@core/schema";
 import { SequentialQueue } from "@core/queue/sequential-queue";
@@ -22,31 +27,32 @@ const DEFAULT_PORT = 8000;
 // MCP session so the raw write + git commit stays strictly sequential.
 const processingQueue = new SequentialQueue();
 
-function readToken(): string | undefined {
-  if (
-    process.argv.includes("--no-auth") ||
-    process.env.KH_MCP_NO_AUTH === "1"
-  ) {
+/**
+ * Resolve the bearer-token allow-list. Returns `undefined` when auth is
+ * explicitly disabled (`--no-auth`), or the list of accepted tokens. Exits
+ * the process when auth is required but misconfigured.
+ */
+function readTokens(): readonly string[] | undefined {
+  const result = resolveAuthTokens(process.env, process.argv);
+  if ("disabled" in result) {
     process.stderr.write(
       "knowledge-hub: WARNING — running WITHOUT authentication. Anyone who\n" +
         "knows the URL can write to your vault and trigger LLM jobs.\n",
     );
     return undefined;
   }
-  const token = process.env.KH_MCP_TOKEN;
-  if (!token || token.length < 16) {
+  if ("error" in result) {
     process.stderr.write(
-      "knowledge-hub: KH_MCP_TOKEN is required for the HTTP server.\n" +
+      `knowledge-hub: ${result.error}\n` +
         "This endpoint is expected to be exposed publicly (e.g. via a\n" +
-        "cloudflared tunnel), so it refuses to start without a bearer token\n" +
-        "of at least 16 characters. Generate one with:\n" +
-        "  openssl rand -hex 32\n" +
-        "then run:  KH_MCP_TOKEN=<token> kh-mcp-http\n" +
-        "To deliberately run without auth: kh-mcp-http --no-auth\n",
+        "cloudflared tunnel), so it refuses to start without a bearer token.\n"
     );
     process.exit(2);
   }
-  return token;
+  process.stderr.write(
+    `knowledge-hub: auth enabled with ${result.tokens.length} ` 
+  );
+  return result.tokens;
 }
 
 function readPort(): number {
@@ -64,15 +70,19 @@ function readPort(): number {
   return port;
 }
 
-function isAuthorized(
+/**
+ * Returns a short fingerprint of the matched token on success, `"-"` when
+ * auth is disabled, or null when the request is unauthorized.
+ */
+function authorize(
   req: IncomingMessage,
-  token: string | undefined,
-): boolean {
-  if (token === undefined) {
-    return true; // auth explicitly disabled via --no-auth
+  tokens: readonly string[] | undefined,
+): string | null {
+  if (tokens === undefined) {
+    return "-"; // auth explicitly disabled via --no-auth
   }
-  const header = req.headers.authorization;
-  return header === `Bearer ${token}`;
+  const matched = matchBearerToken(req.headers.authorization, tokens);
+  return matched ? tokenFingerprint(matched) : null;
 }
 
 function sendJsonError(
@@ -91,7 +101,7 @@ function sendJsonError(
 }
 
 async function main(): Promise<void> {
-  const token = readToken();
+  const tokens = readTokens();
   const port = readPort();
 
   let config: ReturnType<typeof loadConfig>;
@@ -144,7 +154,7 @@ async function main(): Promise<void> {
         sendJsonError(res, 404, "Not found");
         return;
       }
-      if (!isAuthorized(req, token)) {
+      if (authorize(req, tokens) === null) {
         sendJsonError(res, 401, "Unauthorized");
         return;
       }

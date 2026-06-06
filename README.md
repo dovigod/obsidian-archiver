@@ -33,6 +33,13 @@ kh-mcp-http --no-auth    # (또는 KH_MCP_NO_AUTH=1 kh-mcp-http)
 pnpm tunnel
 ```
 
-인증을 넣고 싶다면 별도로 알아서 셋팅하세요 — `KH_MCP_TOKEN`(16자 이상)을 설정하고 `--no-auth` 없이 띄우면 Bearer 토큰 인증이 걸립니다.
+인증을 넣고 싶다면 별도로 알아서 셋팅하세요 — `--no-auth` 없이 띄우고 Bearer 토큰(16자 이상)을 주면 됩니다. 토큰 1개면 `KH_MCP_TOKEN`, 여러 개를 허용하는 화이트리스트면 `KH_MCP_TOKENS`(쉼표/공백 구분):
+
+```bash
+KH_MCP_TOKEN=$(openssl rand -hex 32) kh-mcp-http          # 단일 토큰
+KH_MCP_TOKENS="$TOKEN_A,$TOKEN_B,$TOKEN_C" kh-mcp-http      # 화이트리스트
+```
+
+클라이언트는 `Authorization: Bearer <토큰>` 헤더로 접속하고, 목록에 없는 토큰은 401로 거부됩니다.
 
 이후 대화 중에 "아카이브해" / "이 답변만 아카이브해" 라고 말하면 됩니다.
