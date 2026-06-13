@@ -6,6 +6,8 @@ export interface ClaudeProviderOptions {
   model: string;
   /** Default max_tokens when caller omits one. */
   defaultMaxTokens?: number;
+  /** Hard timeout per request (ms). Forwarded to the SDK client. */
+  timeoutMs?: number;
 }
 
 /**
@@ -18,7 +20,10 @@ export class ClaudeProvider implements LLMProvider {
   private readonly defaultMaxTokens: number;
 
   constructor(opts: ClaudeProviderOptions) {
-    this.client = new Anthropic({ apiKey: opts.apiKey });
+    this.client = new Anthropic({
+      apiKey: opts.apiKey,
+      ...(opts.timeoutMs ? { timeout: opts.timeoutMs } : {}),
+    });
     this.model = opts.model;
     this.defaultMaxTokens = opts.defaultMaxTokens ?? 4096;
   }

@@ -44,6 +44,7 @@ describe("runWorker (in-process drain)", () => {
         vault: { path: vault },
         git: { auto_commit: false },
         logging: { enabled: false },
+        extract: { enabled: true },
       },
     });
     const opened = openTestDb(vault);
@@ -71,6 +72,25 @@ describe("runWorker (in-process drain)", () => {
     llm.respondWhen(
       /transcribing assistant answers/,
       "## Overview\n\n[[Redis]] is an in-memory KV store used for caching.\n",
+    );
+    // Re-ask path (full conversations route here): plan from user questions,
+    // then regenerate a bilingual answer.
+    llm.respondWhen(
+      /planning how to turn one archived conversation/,
+      JSON.stringify({
+        notes: [
+          {
+            title: "Redis",
+            topics: ["redis"],
+            question_indexes: [0],
+            needs_canvas: false,
+          },
+        ],
+      }),
+    );
+    llm.respondWhen(
+      /answering the user's questions yourself/,
+      "## 개요\n\n[[Redis]]는 인메모리 KV 저장소.\n\n---\n\n## English\n\n### Overview\n\n[[Redis]] is an in-memory KV store.\n",
     );
   }
 

@@ -20,11 +20,22 @@ export interface ReconcileResult {
  *   - capture fired but the DB INSERT failed
  *   - the vault was cloned without `.kh.db`
  */
+export interface ReconcileOptions {
+  /**
+   * Re-enqueue an `extract` job for each reinserted conversation. Mirrors
+   * `extract.enabled`; when false, only the conversation row is recovered and
+   * no entity extraction is scheduled. Defaults to true.
+   */
+  extractEnabled?: boolean;
+}
+
 export async function reconcile(
   vaultPath: string,
   conversationsRepo: ConversationsRepository,
   jobsRepo: JobsRepository,
+  options: ReconcileOptions = {},
 ): Promise<ReconcileResult> {
+  const extractEnabled = options.extractEnabled ?? true;
   const result: ReconcileResult = {
     scanned: 0,
     reinserted: 0,
@@ -72,12 +83,14 @@ export async function reconcile(
       });
       result.reinserted += 1;
 
-      jobsRepo.enqueue({
-        id: newId(),
-        type: "extract",
-        payload: { conversation_id: id, conversation_path: relativePath },
-      });
-      result.reenqueued += 1;
+      if (extractEnabled) {
+        jobsRepo.enqueue({
+          id: newId(),
+          type: "extract",
+          payload: { conversation_id: id, conversation_path: relativePath },
+        });
+        result.reenqueued += 1;
+      }
     }
   }
 

@@ -473,7 +473,9 @@ async function runReconcile(): Promise<number> {
   try {
     const conversationsRepo = new ConversationsRepository(db);
     const jobsRepo = new JobsRepository(db, sqlite);
-    const result = await reconcile(config.vault.path, conversationsRepo, jobsRepo);
+    const result = await reconcile(config.vault.path, conversationsRepo, jobsRepo, {
+      extractEnabled: config.extract.enabled,
+    });
     process.stdout.write(
       `scanned ${result.scanned}, reinserted ${result.reinserted}, ` +
         `re-enqueued ${result.reenqueued}\n`,

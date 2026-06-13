@@ -19,6 +19,8 @@ export interface Note {
   id: string;
   title: string;
   topics: string[];
+  /** Free-form tags carried from the source conversation. */
+  tags: string[];
   /** Conversation ids this note was distilled from (accumulated on merge). */
   sources: string[];
   created_at: string;
@@ -83,6 +85,7 @@ export class NotesRepository {
       id: String(parsed.data.id ?? ""),
       title: String(parsed.data.title ?? file.replace(/\.md$/, "")),
       topics: (parsed.data.topics as string[] | undefined) ?? [],
+      tags: (parsed.data.tags as string[] | undefined) ?? [],
       sources: (parsed.data.sources as string[] | undefined) ?? [],
       created_at: String(parsed.data.created_at ?? ""),
       updated_at: String(parsed.data.updated_at ?? ""),
@@ -99,6 +102,8 @@ export class NotesRepository {
     topics: string[];
     body: string;
     sourceConversationId: string;
+    /** Free-form tags from the source conversation. Unioned on merge. */
+    tags?: string[];
     /** Merge target — keeps id/created_at/sources and the on-disk filename. */
     existing?: { file: string; note: Note };
   }): Promise<NoteWriteResult> {
@@ -109,10 +114,12 @@ export class NotesRepository {
       ...new Set([...(prior?.sources ?? []), input.sourceConversationId]),
     ];
     const topics = [...new Set([...(prior?.topics ?? []), ...input.topics])];
+    const tags = [...new Set([...(prior?.tags ?? []), ...(input.tags ?? [])])];
     const data: Record<string, unknown> = {
       id: prior?.id || newId(),
       title: input.title,
       topics,
+      ...(tags.length ? { tags } : {}),
       sources,
       created_at: prior?.created_at || now,
       updated_at: now,

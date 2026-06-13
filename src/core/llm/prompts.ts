@@ -14,7 +14,9 @@ export type PromptName =
   | "rewrite"
   | "notes-plan"
   | "notes-write"
-  | "notes-canvas";
+  | "notes-canvas"
+  | "notes-reask-plan"
+  | "notes-reask-write";
 
 const cache = new Map<PromptName, string>();
 

@@ -23,7 +23,7 @@ function plan(notes: unknown[]): string {
   return JSON.stringify({ notes });
 }
 
-describe("runNotesPipeline (Stage 2 notes job)", () => {
+describe("runNotesPipeline — transcription path (scope: answer)", () => {
   let openHandle: SqliteHandle | null = null;
   afterEach(() => {
     openHandle?.close();
@@ -55,6 +55,9 @@ describe("runNotesPipeline (Stage 2 notes job)", () => {
       {
         source: "claude-code",
         created_at: "2026-06-03T10:00:00.000Z",
+        // The transcription path is now reserved for `archive_answer`
+        // (scope: answer); full conversations route to the re-ask path.
+        scope: "answer",
         messages,
       },
     );

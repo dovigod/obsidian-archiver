@@ -157,14 +157,19 @@ export async function archiveConversation(
   });
 
   const jobsRepo = new JobsRepository(deps.db, deps.sqlite);
-  const extractJobId = jobsRepo.enqueue({
-    id: newId(),
-    type: "extract",
-    payload: {
-      conversation_id: conversation.id,
-      conversation_path: relativePath,
-    },
-  });
+  // Entity extraction (raw → deduped/merged knowledge/ wiki) is gated on
+  // `extract.enabled`. When off, only the topic-notes job is enqueued; the
+  // raw md is still archived untouched.
+  const extractJobId = deps.config.extract.enabled
+    ? jobsRepo.enqueue({
+        id: newId(),
+        type: "extract",
+        payload: {
+          conversation_id: conversation.id,
+          conversation_path: relativePath,
+        },
+      })
+    : "";
   // Topic notes: drop user turns, lightly edit the assistant content into
   // explanatory prose grouped by the user's questions (merging into
   // existing notes/ files when the vault already covers the topic).

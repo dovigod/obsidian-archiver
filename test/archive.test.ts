@@ -39,6 +39,7 @@ describe("archiveConversation (Stage 1)", () => {
       overrides: {
         vault: { path: vault },
         git: { auto_commit: false },
+        extract: { enabled: true },
       },
     });
     const { db, sqlite } = setup(vault);
@@ -85,6 +86,47 @@ describe("archiveConversation (Stage 1)", () => {
     expect(job.type).toBe("extract");
     expect(job.state).toBe("pending");
 
+    const notesJob = sqlite
+      .prepare(`SELECT type, state FROM jobs WHERE id = ?`)
+      .get(result.notesJobId) as { type: string; state: string };
+    expect(notesJob.type).toBe("notes");
+    expect(notesJob.state).toBe("pending");
+  });
+
+  it("skips the extract job when extract.enabled is false (default)", async () => {
+    const dir = mkdtempSync(join(testTmpDir(), "archive-no-extract-"));
+    const vault = join(dir, "vault");
+    await prepareVaultRepo(vault);
+    // No `extract` override → falls to the schema default (disabled).
+    const config = loadConfig({
+      skipGlobal: true,
+      overrides: {
+        vault: { path: vault },
+        git: { auto_commit: false },
+      },
+    });
+    expect(config.extract.enabled).toBe(false);
+    const { db, sqlite } = setup(vault);
+
+    const result = await archiveConversation(
+      { config, db, sqlite },
+      {
+        source: "claude-code",
+        created_at: "2026-05-02T14:22:00.000Z",
+        messages: [
+          { role: "user", content: "hello" },
+          { role: "assistant", content: "world" },
+        ],
+      },
+    );
+
+    // No extract job id, and no extract row in the queue.
+    expect(result.extractJobId).toBe("");
+    expect(result.notesJobId).toBeTruthy();
+    const extractCount = sqlite
+      .prepare(`SELECT COUNT(*) AS n FROM jobs WHERE type = 'extract'`)
+      .get() as { n: number };
+    expect(extractCount.n).toBe(0);
     const notesJob = sqlite
       .prepare(`SELECT type, state FROM jobs WHERE id = ?`)
       .get(result.notesJobId) as { type: string; state: string };

@@ -57,27 +57,31 @@ export const ConfigSchema = z.object({
     }),
   extract: z
     .object({
-      enabled: z.boolean().default(true),
+      enabled: z.boolean().default(false),
       execution: z.nativeEnum(ExecutionMode).default(ExecutionMode.Async),
       llm: z
         .object({
           provider: z.nativeEnum(LLMProvider).default(LLMProvider.Claude),
           model: z.string().default("claude-opus-4-7"),
           api_key_env: z.string().default("ANTHROPIC_API_KEY"),
+          /** Hard timeout per LLM call (ms). Default 120s. */
+          timeout_ms: z.number().int().positive().default(120_000),
         })
         .default({
           provider: LLMProvider.Claude,
           model: "claude-opus-4-7",
           api_key_env: "ANTHROPIC_API_KEY",
+          timeout_ms: 120_000,
         }),
     })
     .default({
-      enabled: true,
+      enabled: false,
       execution: ExecutionMode.Async,
       llm: {
         provider: LLMProvider.Claude,
         model: "claude-opus-4-7",
         api_key_env: "ANTHROPIC_API_KEY",
+        timeout_ms: 120_000,
       },
     }),
   dedup: z

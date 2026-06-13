@@ -189,6 +189,28 @@ export const NotesPlanSchema = z.object({
 export type NotesPlan = z.infer<typeof NotesPlanSchema>;
 
 /**
+ * Re-ask notes plan: one topic group built from the USER's questions only.
+ * Unlike `NotesPlanEntry`, there is no create/merge decision and no
+ * `assistant_indexes` — the re-ask pipeline never transcribes assistant turns
+ * and always creates a fresh note. `question_indexes` are 0-based indexes into
+ * the conversation's USER messages that belong to this topic; meta/command
+ * turns (e.g. "archive this") are simply omitted from every group.
+ */
+export const NotesReaskPlanEntrySchema = z.object({
+  title: z.string().min(1),
+  topics: z.array(z.string()).default([]),
+  /** 0-based indexes into the conversation's user messages. */
+  question_indexes: z.array(z.number().int().nonnegative()).default([]),
+  needs_canvas: z.boolean().default(false),
+});
+export type NotesReaskPlanEntry = z.infer<typeof NotesReaskPlanEntrySchema>;
+
+export const NotesReaskPlanSchema = z.object({
+  notes: z.array(NotesReaskPlanEntrySchema).default([]),
+});
+export type NotesReaskPlan = z.infer<typeof NotesReaskPlanSchema>;
+
+/**
  * Concept-graph spec the notes-canvas LLM call returns for a topic the user
  * struggled with. The server lays the nodes out into a JSON Canvas file —
  * the LLM never emits raw .canvas coordinates.

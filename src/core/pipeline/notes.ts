@@ -13,12 +13,15 @@ import { extractJson } from "@core/pipeline/json";
 import { MarkdownVaultRepository } from "@core/repository/raw";
 import { NotesRepository } from "@core/repository/notes";
 import {
+  ArchiveScope,
   type Conversation,
   type Message,
   type NotesCanvasSpec,
   NotesCanvasSpecSchema,
   type NotesPlan,
   NotesPlanSchema,
+  type NotesReaskPlan,
+  NotesReaskPlanSchema,
   Role,
 } from "@core/schema";
 
@@ -60,8 +63,31 @@ export interface RunNotesResult {
  *
  * Every LLM failure mode is recoverable: malformed plan JSON → no-op,
  * malformed canvas JSON → note is kept, canvas skipped.
+ *
+ * Dispatches by archive scope: `answer` captures (from the `archive_answer`
+ * MCP tool) keep the legacy transcription path; full conversations use the
+ * re-ask path, which regenerates rich answers from the user's questions
+ * (the archived assistant turns are often lossy summaries).
  */
 export async function runNotesPipeline(
+  config: Config,
+  llm: LLMProvider,
+  input: RunNotesInput,
+): Promise<RunNotesResult> {
+  const raw = new MarkdownVaultRepository(config.vault.path);
+  const conversation = await raw.readConversation(input.conversationPath);
+  if (conversation.scope === ArchiveScope.Answer) {
+    return runTranscriptionNotes(config, llm, input);
+  }
+  return runReaskNotes(config, llm, input, conversation);
+}
+
+/**
+ * Legacy transcription path (now only used for `archive_answer` captures):
+ * lightly edits the archived assistant turns into a topic note, merging into
+ * existing notes when the vault already covers the theme.
+ */
+async function runTranscriptionNotes(
   config: Config,
   llm: LLMProvider,
   input: RunNotesInput,
@@ -201,6 +227,192 @@ export async function runNotesPipeline(
     canvases,
     committed,
   };
+}
+
+/**
+ * Re-ask path (full conversations): take the USER's questions verbatim, group
+ * them into topic notes, then re-ask the LLM to ANSWER each group richly —
+ * the archived assistant turns are passed only as lossy context hints. Always
+ * creates fresh notes (no compare/merge against existing notes).
+ */
+async function runReaskNotes(
+  config: Config,
+  llm: LLMProvider,
+  input: RunNotesInput,
+  conversation: Conversation,
+): Promise<RunNotesResult> {
+  const empty: RunNotesResult = {
+    conversationId: input.conversationId,
+    notes: [],
+    canvases: [],
+    committed: false,
+  };
+
+  const userMessages = conversation.messages.filter(
+    (m) => m.role === Role.User,
+  );
+  if (userMessages.length === 0) {
+    return empty;
+  }
+
+  const numberedQuestions = userMessages
+    .map((m, i) => `[#${i}] ${m.content.trim()}`)
+    .join("\n\n");
+  // The archived assistant turns are summaries; they survive only as hints so
+  // the regenerated answer keeps conversation-specific detail.
+  const contextSummary = conversation.messages
+    .filter((m) => m.role === Role.Assistant)
+    .map((m) => m.content.trim())
+    .filter((s) => s.length > 0)
+    .join("\n\n---\n\n");
+
+  const plan = await planReaskNotes(llm, numberedQuestions);
+  if (!plan || plan.notes.length === 0) {
+    return empty;
+  }
+
+  const notesRepo = new NotesRepository(config.vault.path);
+  const written: NoteResult[] = [];
+  const writtenAbsPaths: string[] = [];
+  const canvases: string[] = [];
+
+  const writeTpl = await loadPrompt("notes-reask-write");
+  for (const entry of plan.notes) {
+    const indexes = entry.question_indexes.filter(
+      (i) => i < userMessages.length,
+    );
+    const groupQuestions = (
+      indexes.length ? indexes.map((i) => userMessages[i]!) : userMessages
+    )
+      .map((m) => `- ${m.content.trim()}`)
+      .join("\n");
+
+    let body = (
+      await llm.complete({
+        prompt: render(writeTpl, {
+          title: entry.title,
+          questions: groupQuestions,
+          context_summary: contextSummary,
+        }),
+        maxTokens: 16000,
+      })
+    ).trim();
+    // "EMPTY" is the prompt's explicit no-content sentinel.
+    if (!body || body === "EMPTY") {
+      continue;
+    }
+
+    // Build the canvas BEFORE writing the note so we can inject a back-link
+    // into the note body. The note filename is deterministic (always create),
+    // so writeConceptCanvas embeds the right note and derives a matching slug.
+    const noteFile = notesRepo.fileForTitle(entry.title);
+    if (entry.needs_canvas) {
+      const canvasRel = await writeConceptCanvas(config.vault.path, llm, {
+        title: entry.title,
+        noteFile,
+        noteBody: body,
+      });
+      if (canvasRel) {
+        body = injectCanvasLink(body, canvasRel);
+        canvases.push(canvasRel);
+        writtenAbsPaths.push(join(resolve(config.vault.path), canvasRel));
+      }
+    }
+
+    const result = await notesRepo.write({
+      title: entry.title,
+      topics: entry.topics,
+      tags: conversation.tags,
+      body,
+      sourceConversationId: input.conversationId,
+    });
+    written.push({
+      file: result.file,
+      relativePath: result.relativePath,
+      title: entry.title,
+      action: "create",
+      needsCanvas: entry.needs_canvas,
+    });
+    writtenAbsPaths.push(result.absolutePath);
+  }
+
+  if (written.length === 0) {
+    return empty;
+  }
+
+  if (written.length >= 2) {
+    const overviewRel = await writeOverviewCanvas(
+      config.vault.path,
+      input.conversationId,
+      written,
+    );
+    canvases.push(overviewRel);
+    writtenAbsPaths.push(join(resolve(config.vault.path), overviewRel));
+  }
+
+  let committed = false;
+  if (config.git.auto_commit && writtenAbsPaths.length > 0) {
+    committed = await autoCommit({
+      vaultPath: config.vault.path,
+      files: writtenAbsPaths,
+      message: commitMessageForNotes(input.conversationId, written, canvases),
+    });
+    if (committed && config.git.auto_push) {
+      const token = resolvePushToken();
+      const remoteUrl = resolvePushRemoteUrl();
+      await pushVault({
+        vaultPath: config.vault.path,
+        remote: config.git.push.remote,
+        branch: config.git.push.branch,
+        ...(remoteUrl ? { remoteUrl } : {}),
+        ...(token ? { token } : {}),
+      });
+    }
+  }
+
+  return {
+    conversationId: input.conversationId,
+    notes: written,
+    canvases,
+    committed,
+  };
+}
+
+async function planReaskNotes(
+  llm: LLMProvider,
+  numberedQuestions: string,
+): Promise<NotesReaskPlan | null> {
+  const tpl = await loadPrompt("notes-reask-plan");
+  const text = await llm.complete({
+    prompt: render(tpl, { questions: numberedQuestions }),
+    maxTokens: 4096,
+  });
+  let rawJson: unknown;
+  try {
+    rawJson = extractJson<unknown>(text);
+  } catch {
+    return null;
+  }
+  const parsed = NotesReaskPlanSchema.safeParse(rawJson);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Inject a link to the concept canvas into the bilingual note body: a Korean
+ * `## 다이어그램` section just before the `---` language separator, and an
+ * English `## Diagram` section at the end. Falls back to a single appended
+ * section when no separator is present.
+ */
+function injectCanvasLink(body: string, canvasRel: string): string {
+  const ko = `## 다이어그램\n\n[[${canvasRel}|개념도]]`;
+  const en = `## Diagram\n\n[[${canvasRel}|Concept map]]`;
+  const sep = body.search(/^---$/m);
+  if (sep !== -1) {
+    const before = body.slice(0, sep).trimEnd();
+    const after = body.slice(sep).trimEnd();
+    return `${before}\n\n${ko}\n\n${after}\n\n${en}\n`;
+  }
+  return `${body.trimEnd()}\n\n${ko}\n\n${en}\n`;
 }
 
 function truncate(text: string, max: number): string {

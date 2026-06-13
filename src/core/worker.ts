@@ -168,9 +168,12 @@ async function processJob(
 function buildLLMFromConfig(config: Config): LLMProvider {
   const { provider, model } = config.extract.llm;
 
+  const timeoutMs = config.extract.llm.timeout_ms;
+
   if (provider === "claude-cli") {
     return new ClaudeCliProvider({
       ...(model ? { model } : {}),
+      ...(timeoutMs ? { timeoutMs } : {}),
     });
   }
 
@@ -185,7 +188,11 @@ function buildLLMFromConfig(config: Config): LLMProvider {
           `in your knowledge-hub config (or re-run \`kh setup --llm claude-cli\`).`,
       );
     }
-    return new ClaudeProvider({ apiKey, model });
+    return new ClaudeProvider({
+      apiKey,
+      model,
+      ...(timeoutMs ? { timeoutMs } : {}),
+    });
   }
 
   throw new Error(

@@ -58,11 +58,33 @@ function formatMessages(messages: readonly Message[]): string {
 const MSG_SENTINEL_RE =
   /^<!-- kh:msg (user|assistant|system|tool)(?: (\S+))? -->$/gm;
 
+// Same body as MSG_SENTINEL_RE without anchors/captures — reused by the
+// escape/unescape helpers below.
+const SENTINEL_BODY = "<!-- kh:msg (?:user|assistant|system|tool)(?: \\S+)? -->";
+
+// A message can legitimately CONTAIN a line that looks exactly like our
+// divider (e.g. this very conversation, which discusses the sentinel format).
+// Without escaping, such a line would be parsed as a real divider and split
+// one message into several. On write we prefix any such content line with a
+// backslash; on read we strip exactly one. Already-escaped lines gain/lose one
+// backslash so arbitrary `\`-prefixed content round-trips too.
+const ESCAPE_SENTINEL_RE = new RegExp(`^(\\\\*)(${SENTINEL_BODY})$`, "gm");
+const UNESCAPE_SENTINEL_RE = new RegExp(`^\\\\(\\\\*${SENTINEL_BODY})$`, "gm");
+
+function escapeSentinels(content: string): string {
+  return content.replace(ESCAPE_SENTINEL_RE, "\\$1$2");
+}
+
+function unescapeSentinels(content: string): string {
+  return content.replace(UNESCAPE_SENTINEL_RE, "$1");
+}
+
 function formatSentinelMessages(messages: readonly Message[]): string {
   return messages
     .map((m) => {
       const ts = m.timestamp ? ` ${m.timestamp}` : "";
-      return `<!-- kh:msg ${m.role}${ts} -->\n# ${ROLE_HEADERS[m.role]}\n\n${m.content.trim()}`;
+      const content = escapeSentinels(m.content.trim());
+      return `<!-- kh:msg ${m.role}${ts} -->\n# ${ROLE_HEADERS[m.role]}\n\n${content}`;
     })
     .join("\n\n");
 }
@@ -84,6 +106,7 @@ function parseSentinelMessages(body: string): Message[] {
     } else if (chunk === headingLine) {
       chunk = "";
     }
+    chunk = unescapeSentinels(chunk);
     const message: Message = { role, content: chunk.trim() };
     if (timestamp !== undefined) {
       message.timestamp = timestamp;
@@ -253,10 +276,14 @@ function parseMessagesBody(body: string): Message[] {
       continue;
     }
     let rest = newlineIdx === -1 ? "" : section.slice(newlineIdx + 1);
-    // Clip the message body at the next ^## H2 marker so trailing template
-    // sections appended AFTER the verbatim transcript (e.g. "## Related
-    // questions") don't get swallowed into the final assistant message.
-    const h2Cut = rest.search(/^## /m);
+    // Clip ONLY the known trailing template section(s) that `formatBody`
+    // appends AFTER the verbatim transcript (currently just "## Related
+    // questions"). The previous code clipped at the FIRST `^## ` of any kind,
+    // which silently DELETED legitimate assistant content — ASCII diagrams,
+    // mermaid/code fences, notes — whenever the model wrote an ordinary
+    // "## Heading" mid-message. Matching the specific heading keeps real
+    // content intact while still stripping the appended template block.
+    const h2Cut = rest.search(/^## Related questions[ \t]*$/m);
     if (h2Cut !== -1) {
       rest = rest.slice(0, h2Cut);
     }
